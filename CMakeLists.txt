@@ -1,0 +1,287 @@
+cmake_minimum_required(VERSION 3.16)
+project(IOMeeter LANGUAGES C)
+
+# Only Windows executables carry an icon inside the file itself.
+if(WIN32)
+    enable_language(RC)
+endif()
+
+set(CMAKE_C_STANDARD 99)
+set(CMAKE_C_STANDARD_REQUIRED ON)
+
+add_executable(IOMeeter
+    main.c
+    include/usbdev.c
+    include/jsoncmd.c
+    include/proto.c
+    include/app.c
+    include/ui.c
+    include/tray.c
+    include/fader.c
+    include/config.c
+    include/devcfg.c
+    include/appname.c
+    include/keys.c
+    include/keysend.c
+    include/media.c
+    include/foreground.c
+    include/filedialog.c
+    include/respath.c
+    include/cli.c
+    include/console.c
+    include/instance.c
+    include/window.c
+    include/watchdog.c
+    include/volume.c
+    libs/cJSON.c
+    include/mixer.c
+)
+
+# Clay is a single-header library; exactly one translation unit may define its
+# implementation, and ui.c is that unit.
+set_source_files_properties(include/ui.c PROPERTIES
+    COMPILE_DEFINITIONS "CLAY_IMPLEMENTATION")
+set_target_properties(IOMeeter PROPERTIES OUTPUT_NAME "IOMeeter")
+
+# Only Windows gets the extension. CMake would append it there anyway, but
+# stating it keeps the intent obvious -- setting SUFFIX unconditionally is what
+# produced a "main.exe" on Linux.
+if(WIN32)
+    set_target_properties(IOMeeter PROPERTIES SUFFIX ".exe")
+
+    # Link as a GUI application so no console window appears behind the
+    # interface. console.c opens one on demand when config.json sets "debug".
+    # MinGW keeps main() as the entry point under -mwindows.
+    set_target_properties(IOMeeter PROPERTIES WIN32_EXECUTABLE TRUE)
+
+    # Gives the .exe its own icon in Explorer, independent of the window and
+    # tray icons, which are loaded at run time. windres resolves icon.ico
+    # relative to the .rc file, so no include path is needed.
+    target_sources(IOMeeter PRIVATE resources/icon.rc)
+endif()
+
+# Our own headers, plus the vendored Clay single-headers in libs/. libusb's
+# header is NOT here -- it comes from vcpkg or the system, and a stale copy in
+# this directory would shadow it.
+target_include_directories(IOMeeter PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/include"
+    "${CMAKE_CURRENT_SOURCE_DIR}/libs")
+
+# --- raylib, the renderer behind Clay ----------------------------------------
+#
+# Clay only computes layout, so it needs a backend to draw and to own the
+# window. vcpkg provides a config package on Windows; elsewhere raylib comes
+# from the system and pkg-config or a plain link is enough.
+find_package(raylib CONFIG QUIET)
+if(TARGET raylib)
+    target_link_libraries(IOMeeter PRIVATE raylib)
+    message(STATUS "raylib found via: CMake package")
+else()
+    find_package(PkgConfig QUIET)
+    if(PkgConfig_FOUND)
+        pkg_check_modules(RAYLIB QUIET IMPORTED_TARGET raylib)
+    endif()
+    if(TARGET PkgConfig::RAYLIB)
+        target_link_libraries(IOMeeter PRIVATE PkgConfig::RAYLIB)
+        message(STATUS "raylib found via: pkg-config")
+    else()
+        message(FATAL_ERROR
+            "raylib not found.\n"
+            "  vcpkg:           vcpkg install raylib:<triplet>\n"
+            "  Debian/Ubuntu:   sudo apt install libraylib-dev\n"
+            "  macOS:           brew install raylib")
+    endif()
+endif()
+
+# raylib and the wheel generator both need the math library on Unix, and
+# watchdog.c needs pthreads there.
+if(UNIX)
+    find_package(Threads REQUIRED)
+    target_link_libraries(IOMeeter PRIVATE m Threads::Threads)
+endif()
+
+# The tray, the window icon and the file dialogs go through the Windows shell;
+# ole32 also carries the COM plumbing the audio mixer needs.
+if(WIN32)
+    # dwmapi tells cloaked windows from real ones, which keeps suspended
+    # store apps out of the running-application list; version reads the
+    # FileDescription that gives each one its name.
+    target_link_libraries(IOMeeter PRIVATE
+        shell32 user32 gdi32 comdlg32 ole32 mmdevapi dwmapi version
+        # runtimeobject carries the Windows runtime entry points media.c uses
+        # to reach one application's media session rather than the global one.
+        runtimeobject)
+else()
+    # Per-application volume comes from PulseAudio, which also serves PipeWire
+    # through its compatibility layer. Optional: without it the mixer reports
+    # itself unavailable and everything else still runs.
+    find_package(PkgConfig QUIET)
+    if(PkgConfig_FOUND)
+        pkg_check_modules(PULSE QUIET IMPORTED_TARGET libpulse)
+    endif()
+    if(TARGET PkgConfig::PULSE)
+        target_link_libraries(IOMeeter PRIVATE PkgConfig::PULSE)
+        target_compile_definitions(IOMeeter PRIVATE MIXER_HAVE_PULSE)
+        message(STATUS "mixer: PulseAudio")
+    else()
+        message(WARNING
+            "libpulse not found: per-application volume will be disabled.
+"
+            "  Debian/Ubuntu: sudo apt install libpulse-dev")
+    endif()
+
+    # The tray icon goes through StatusNotifierItem, which is what Cinnamon,
+    # KDE and the GNOME extensions listen on. Optional: without it the window
+    # simply has no tray icon and its close button quits.
+    if(PkgConfig_FOUND)
+        pkg_check_modules(APPINDICATOR QUIET IMPORTED_TARGET ayatana-appindicator3-0.1)
+    endif()
+    if(TARGET PkgConfig::APPINDICATOR)
+        target_link_libraries(IOMeeter PRIVATE PkgConfig::APPINDICATOR)
+        target_compile_definitions(IOMeeter PRIVATE TRAY_HAVE_APPINDICATOR)
+        message(STATUS "tray: Ayatana AppIndicator")
+    else()
+        message(WARNING
+            "libayatana-appindicator not found: there will be no tray icon.
+"
+            "  Debian/Ubuntu/Mint: sudo apt install libayatana-appindicator3-dev")
+    endif()
+
+    # The macro pad synthesises key presses through the XTEST extension, which
+    # also serves XWayland clients. Optional: without it the pad still edits
+    # and saves, and only playback reports itself unavailable.
+    if(PkgConfig_FOUND)
+        pkg_check_modules(XTST QUIET IMPORTED_TARGET xtst)
+    endif()
+    if(TARGET PkgConfig::XTST)
+        target_link_libraries(IOMeeter PRIVATE PkgConfig::XTST)
+        target_compile_definitions(IOMeeter PRIVATE KEYSEND_HAVE_XTEST)
+        message(STATUS "macro keys: XTEST")
+    else()
+        message(WARNING
+            "libXtst not found: macro keys will not be able to type.
+"
+            "  Debian/Ubuntu/Mint: sudo apt install libxtst-dev")
+    endif()
+
+    # The running-application list comes from the EWMH properties the window
+    # manager publishes. Optional: without it profiles are still chosen by
+    # hand, they simply do not follow whatever is in front.
+    if(PkgConfig_FOUND)
+        pkg_check_modules(X11 QUIET IMPORTED_TARGET x11)
+    endif()
+    if(TARGET PkgConfig::X11)
+        target_link_libraries(IOMeeter PRIVATE PkgConfig::X11)
+        target_compile_definitions(IOMeeter PRIVATE FOREGROUND_HAVE_X11)
+        message(STATUS "running applications: X11 EWMH")
+    else()
+        message(WARNING
+            "libX11 not found: profiles will not switch on their own.
+"
+            "  Debian/Ubuntu/Mint: sudo apt install libx11-dev")
+    endif()
+endif()
+
+# The interface loads its fonts from resources/ relative to the working
+# directory, so keep a copy beside the executable.
+add_custom_command(TARGET IOMeeter POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+            "${CMAKE_CURRENT_SOURCE_DIR}/resources"
+            "$<TARGET_FILE_DIR:IOMeeter>/resources")
+
+if(MSVC)
+    target_compile_definitions(IOMeeter PRIVATE _CRT_SECURE_NO_WARNINGS)
+    target_compile_options(IOMeeter PRIVATE /W3)
+else()
+    target_compile_options(IOMeeter PRIVATE -Wall -Wextra)
+endif()
+
+# --- locate libusb-1.0 -------------------------------------------------------
+#
+# Resolution order:
+#   1. pkg-config   Linux, macOS, MSYS2, and vcpkg when pkgconf is on PATH
+#   2. find_path / find_library
+#                   vcpkg (its toolchain puts installed/<triplet> on
+#                   CMAKE_PREFIX_PATH, so no vcpkg-specific code is needed),
+#                   Homebrew, system packages, or -DLIBUSB_ROOT=<dir>
+#
+# vcpkg ships no CMake config package for libusb, so find_package(libusb) is
+# not attempted -- it would always fail and only add noise.
+#
+set(LIBUSB_SOURCE "")
+
+find_package(PkgConfig QUIET)
+if(PkgConfig_FOUND)
+    pkg_check_modules(LIBUSB QUIET IMPORTED_TARGET libusb-1.0)
+endif()
+
+if(TARGET PkgConfig::LIBUSB)
+    target_link_libraries(IOMeeter PRIVATE PkgConfig::LIBUSB)
+    set(LIBUSB_SOURCE "pkg-config")
+else()
+    # vcpkg installs the header as <prefix>/include/libusb-1.0/libusb.h, so the
+    # libusb-1.0 suffix is what makes plain #include <libusb.h> resolve.
+    find_path(LIBUSB_INCLUDE_DIR
+        NAMES libusb.h
+        PATH_SUFFIXES libusb-1.0
+        HINTS ${LIBUSB_ROOT} ENV LIBUSB_ROOT)
+
+    find_library(LIBUSB_LIBRARY
+        NAMES usb-1.0 libusb-1.0
+        HINTS ${LIBUSB_ROOT} ENV LIBUSB_ROOT)
+
+    if(NOT LIBUSB_INCLUDE_DIR OR NOT LIBUSB_LIBRARY)
+        set(_hint "")
+        if(DEFINED VCPKG_TARGET_TRIPLET)
+            # Being here with a vcpkg toolchain almost always means the port is
+            # installed for a different triplet than the one being built.
+            set(_hint
+                "\n  This build uses vcpkg triplet '${VCPKG_TARGET_TRIPLET}'."
+                "\n  Install libusb for it:"
+                "\n      vcpkg install libusb:${VCPKG_TARGET_TRIPLET}"
+                "\n  A port installed for another triplet is not visible here.")
+        endif()
+        message(FATAL_ERROR
+            "libusb-1.0 not found.\n"
+            "  vcpkg:           vcpkg install libusb:<triplet>, and configure with\n"
+            "                   -DCMAKE_TOOLCHAIN_FILE=<vcpkg>/scripts/buildsystems/vcpkg.cmake\n"
+            "  Debian/Ubuntu:   sudo apt install libusb-1.0-0-dev\n"
+            "  Fedora:          sudo dnf install libusb1-devel\n"
+            "  macOS:           brew install libusb\n"
+            "  MSYS2:           pacman -S mingw-w64-x86_64-libusb\n"
+            "  unpacked build:  -DLIBUSB_ROOT=C:/path/to/libusb"
+            ${_hint})
+    endif()
+
+    target_include_directories(IOMeeter PRIVATE ${LIBUSB_INCLUDE_DIR})
+    target_link_libraries(IOMeeter PRIVATE ${LIBUSB_LIBRARY})
+    set(LIBUSB_SOURCE "${LIBUSB_LIBRARY}")
+
+    # libusb reaches WinUSB through the setup API and COM. Required for a static
+    # link, harmless alongside an import library.
+    if(WIN32)
+        target_link_libraries(IOMeeter PRIVATE setupapi ole32 advapi32)
+    endif()
+endif()
+
+# Put the runtime DLL beside the executable. vcpkg only does this automatically
+# for MSVC targets, so a MinGW build would otherwise fail to start.
+if(WIN32 AND LIBUSB_LIBRARY)
+    get_filename_component(_libusb_libdir "${LIBUSB_LIBRARY}" DIRECTORY)
+    get_filename_component(_libusb_prefix "${_libusb_libdir}" DIRECTORY)
+
+    find_file(LIBUSB_RUNTIME_DLL
+        NAMES libusb-1.0.dll usb-1.0.dll
+        HINTS "${_libusb_prefix}/bin" "${_libusb_libdir}"
+        NO_DEFAULT_PATH)
+
+    if(LIBUSB_RUNTIME_DLL)
+        add_custom_command(TARGET IOMeeter POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    "${LIBUSB_RUNTIME_DLL}"
+                    "$<TARGET_FILE_DIR:IOMeeter>")
+        message(STATUS "libusb runtime: ${LIBUSB_RUNTIME_DLL}")
+    endif()
+endif()
+
+message(STATUS "libusb-1.0 found via: ${LIBUSB_SOURCE}")
