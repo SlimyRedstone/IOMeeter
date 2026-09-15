@@ -38,10 +38,21 @@ const keys_binding_t *keys_binding_const(const keys_t *k, int id, int profile)
     return keys_binding((keys_t *)k, id, profile);
 }
 
+void keys_binding_clear(keys_binding_t *b)
+{
+    memset(b, 0, sizeof(*b));
+    b->color = KEYS_COLOR_DEFAULT;
+
+    /* Zero already, but stated: the action is only a default because the
+       enumeration puts play/pause first, and that could change. */
+    b->macro.media_action = MEDIA_PLAY_PAUSE;
+}
+
 bool keys_binding_empty(const keys_binding_t *b)
 {
     return b->name[0] == 0 && b->macro.count == 0 && b->macro.text[0] == 0 &&
-           b->macro.media[0] == 0 && b->color == KEYS_COLOR_DEFAULT;
+           b->macro.media[0] == 0 && b->macro.target[0] == 0 &&
+           b->color == KEYS_COLOR_DEFAULT;
 }
 
 int keys_add_profile(keys_t *k, const char *name)
@@ -240,9 +251,18 @@ void keys_macro_set_text(keys_macro_t *m, const char *text)
 
 void keys_macro_set_target(keys_macro_t *m, const char *app)
 {
-    /* Not a kind of its own: it says where the chord goes, so it leaves the
-       steps alone. */
+    /* Not a kind of its own: it says which application the key is about, so it
+       leaves the steps alone. */
     snprintf(m->target, KEYS_APP_NAME_MAX, "%s", app ? appname_base(app) : "");
+
+    /* One application, under two names. A media macro is addressed by "media"
+       and a chord by "target", but the editor offers a single field for both,
+       so the two must not be able to drift apart -- and an application taken
+       away leaves nothing for a media action to address, which ends the macro
+       being a media one at all. */
+    if (m->media[0] != 0) {
+        snprintf(m->media, KEYS_APP_NAME_MAX, "%s", m->target);
+    }
 }
 
 void keys_macro_set_media(keys_macro_t *m, const char *app)
@@ -251,12 +271,25 @@ void keys_macro_set_media(keys_macro_t *m, const char *app)
     memset(m->cmds, 0, sizeof(m->cmds));
     memset(m->timings, 0, sizeof(m->timings));
     m->text[0] = 0;
-    m->target[0] = 0;
 
     /* A path is accepted because that is what a file dialog hands back, but
        only its last part is kept: a program is matched while it runs, by the
        name of the file it was started from. */
     snprintf(m->media, KEYS_APP_NAME_MAX, "%s", app ? appname_base(app) : "");
+
+    /* The target follows rather than being cleared: it is the same
+       application, and it is the one the editor shows. A file written with
+       only "media" in it therefore comes back with both, which is what lets
+       the one field in the editor stand for either kind. */
+    snprintf(m->target, KEYS_APP_NAME_MAX, "%s", m->media);
+}
+
+void keys_macro_set_media_action(keys_macro_t *m, media_action_t action)
+{
+    /* Not a kind of its own either: it says what the application is told, so
+       it leaves the name alone the way a target leaves the steps alone. */
+    m->media_action = ((int)action >= 0 && (int)action < MEDIA_ACTION_COUNT)
+                    ? action : MEDIA_PLAY_PAUSE;
 }
 
 bool keys_macro_add(keys_macro_t *m, const char *cmd, int timing)
@@ -358,7 +391,16 @@ static bool load_macro(const cJSON *entry, keys_macro_t *out)
 
         if (cJSON_IsString(media) && media->valuestring &&
             media->valuestring[0] != 0) {
+            const cJSON *action = cJSON_GetObjectItemCaseSensitive(entry,
+                                                                   "action");
+
             keys_macro_set_media(out, media->valuestring);
+
+            /* An absent or unknown name reads as play/pause rather than as an
+               error: media_action_parse() is what decides that, so the file
+               and the interface cannot disagree about it. */
+            keys_macro_set_media_action(out, media_action_parse(
+                cJSON_IsString(action) ? action->valuestring : NULL));
             return true;
         }
 
@@ -385,6 +427,7 @@ static bool load_macro(const cJSON *entry, keys_macro_t *out)
     out->count = 0;
     out->text[0] = 0;
     out->media[0] = 0;
+    out->media_action = MEDIA_PLAY_PAUSE;
     out->target[0] = 0;
 
     /* Where the chord goes, if anywhere in particular. */
@@ -644,8 +687,20 @@ static bool save_binding(cJSON *macros, const keys_binding_t *binding, int profi
     /* The three are alternatives, so only one of the keys is ever written and
        the reader tells them apart by which is there. */
     if (binding->macro.count == 0 && binding->macro.media[0] != 0) {
-        return cJSON_AddStringToObject(entry, "media",
-                                       binding->macro.media) != NULL;
+        if (cJSON_AddStringToObject(entry, "media",
+                                    binding->macro.media) == NULL) {
+            return false;
+        }
+
+        /* Only written when it is not the default, so a key that plays and
+           pauses reads exactly as it always did. */
+        if (binding->macro.media_action != MEDIA_PLAY_PAUSE &&
+            cJSON_AddStringToObject(entry, "action",
+                                    media_action_id(binding->macro.media_action))
+                == NULL) {
+            return false;
+        }
+        return true;
     }
 
     if (binding->macro.count == 0 && binding->macro.text[0] != 0) {

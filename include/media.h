@@ -1,5 +1,5 @@
 /*
- * Toggling one application's playback, rather than whatever played last.
+ * Driving one application's transport, rather than whatever played last.
  *
  * A media key is global. Windows hands VK_MEDIA_PLAY_PAUSE to whichever
  * program owns the system media session, and the desktops do much the same, so
@@ -10,7 +10,7 @@
  * One API, two implementations chosen at compile time:
  *
  *   Windows  The media session the application publishes -- the same list the
- *            volume flyout shows -- told to toggle itself. Sending the window
+ *            volume flyout shows -- told to do one thing. Sending the window
  *            a WM_APPCOMMAND instead does not work: a window that does not
  *            handle it passes it to DefWindowProc, which hands it to the
  *            shell, which turns it back into the global key that toggles
@@ -43,6 +43,40 @@
 /** Longest explanation media_last_error() will give back. */
 #define MEDIA_ERROR_MAX 200
 
+/*
+ * What an application is told to do.
+ *
+ * The list is what both platforms expose through the one interface used here,
+ * rather than either one's full set: Windows also carries fast-forward, rewind
+ * and channel up/down on its session, and MPRIS has Seek, but almost nothing
+ * implements them and a button that usually does nothing is worse than none.
+ *
+ * MEDIA_PLAY_PAUSE is zero so that a macro read from a file written before
+ * there was a choice comes back as the only thing it could have meant.
+ */
+typedef enum {
+    MEDIA_PLAY_PAUSE = 0,
+    MEDIA_NEXT,
+    MEDIA_PREVIOUS,
+    MEDIA_STOP,
+    MEDIA_ACTION_COUNT
+} media_action_t;
+
+/** Short label for @p action, as the interface shows it. Never NULL. */
+const char *media_action_label(media_action_t action);
+
+/** The name @p action is written under in config.json. Never NULL. */
+const char *media_action_id(media_action_t action);
+
+/**
+ * Read an action back from the name media_action_id() gave it.
+ *
+ * Anything unrecognised, NULL included, reads as MEDIA_PLAY_PAUSE: a file
+ * naming an action this build does not have still plays something sensible
+ * rather than nothing at all.
+ */
+media_action_t media_action_parse(const char *name);
+
 /**
  * Whether this build can address an application at all.
  *
@@ -65,13 +99,14 @@ const char *media_last_error(void);
 unsigned media_failures(void);
 
 /**
- * Start or stop @p app playing, leaving every other program alone.
+ * Tell @p app to do @p action, leaving every other program alone.
  *
- * @param app Executable name or path. Only the file name is used.
+ * @param app    Executable name or path. Only the file name is used.
+ * @param action What to ask for.
  * @return false when nothing of that name is running, when it is running but
  *         will not take the command, or when the platform cannot send one.
  *         media_last_error() says which.
  */
-bool media_toggle(const char *app);
+bool media_command(const char *app, media_action_t action);
 
 #endif /* MEDIA_H */

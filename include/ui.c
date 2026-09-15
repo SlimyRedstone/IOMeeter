@@ -11,6 +11,7 @@
 #include "foreground.h"
 #include "instance.h"
 #include "keysend.h"
+#include "media.h"
 #include "watchdog.h"
 #include "respath.h"
 #include "tray.h"
@@ -76,9 +77,22 @@ static int s_tab = TAB_MAIN;
 #define KEY_GLOW_RINGS   4
 #define KEY_GLOW_ALPHA   150.0f
 #define KEY_GAP         6
-#define KEY_EDITOR_W    430
+#define KEY_EDITOR_W    560
 #define KEY_STEPS_H     190
-#define KEY_LABEL_W     76
+
+/* Wide enough for "Execute keystroke in", which wraps to two lines rather
+   than pushing every field in the editor across to make room for it. */
+#define KEY_LABEL_W     132
+
+/*
+ * Width of a scrolling panel's scrollbar, and the room kept clear for it.
+ *
+ * The bar is drawn by raylib over the panel rather than laid out inside it,
+ * so nothing would otherwise stop a row from running underneath it -- which
+ * is what put the delete button of every recorded step behind the thumb.
+ */
+#define LOG_BAR_W       10.0f
+#define KEY_BAR_GUTTER  18
 
 /* Comfortably more than the table holds; keysend_names() reports the truth. */
 #define KEYSEND_NAMES_MAX 160
@@ -89,6 +103,10 @@ static int s_tab = TAB_MAIN;
 /* The key's colour wheel: the disc, the brightness slider beside it, and the
    padding around both. */
 #define KEY_COLOUR_W      340
+
+/* Narrower than the editor it covers, so what it is asking about stays
+   visible around it. */
+#define KEY_CONFIRM_W     400
 
 /* The card holding the controller's four state colours. Wide enough for the
    longest hint at caption size. */
@@ -116,6 +134,11 @@ static int s_tab = TAB_MAIN;
 /* The profile card holds short rows -- a name, two buttons, a few executables
    -- which fit into far less width than they are comfortable to read in. */
 #define PROFILES_MIN_W  420
+
+/* Where the profile list starts scrolling instead of growing. Not a fixed
+   height: the container fits its rows up to this and no further, so one
+   profile does not sit in an empty box. */
+#define PROFILES_MAX_H  360
 
 /* Profile the running-application picker is adding to, or -1 when closed. */
 static int s_picker = -1;
@@ -149,10 +172,30 @@ static bool s_key_record;
    it once six digits are there. */
 static char s_key_hex[8];
 
+/* What the wheel last wrote into s_key_hex. Anything else in there was typed,
+   and is the one case worth parsing back into the disc's position. */
+static char s_key_hex_seen[8];
+
 /* Whether the key's colour wheel is up, and the colour it is working on.
    Its own hue, saturation and value: the NeoPixel wheel on the other tab uses
    the same widget, and picking a key colour must not drag that with it. */
 static bool  s_key_wheel;
+
+/* The delete confirmation is up. Nothing is destroyed until it answers. */
+static bool  s_key_delete;
+
+/*
+ * Who owns the pointer while a button is held, one flag per control.
+ *
+ * Shared state here is what made the colour panel feel wrong: press anywhere
+ * and every control under the pointer's path answered.
+ */
+static bool s_wheel_grab;           /* the wheel on the configuration tab */
+static bool s_bright_grab;          /* and its brightness                 */
+static bool s_led_bright_grab;      /* the LED brightness beside it       */
+static bool s_key_wheel_grab;       /* the wheel in the macro editor      */
+static bool s_key_bright_grab;      /* and its brightness                 */
+
 static float s_key_wheel_h;
 static float s_key_wheel_s;
 static float s_key_wheel_v = 1.0f;
@@ -161,11 +204,9 @@ static float s_key_wheel_v = 1.0f;
 static char s_key_timing[KEYS_MACRO_MAX][8];
 
 /* The application a key toggles the playback of, while it is being typed. */
-static char s_key_media[KEYS_APP_NAME_MAX];
 
 /* And the one its chord is aimed at, for a program that answers a keystroke
    but publishes no media session. */
-static char s_key_target[KEYS_APP_NAME_MAX];
 
 /* Narrows the key list to the names containing it. A hundred and twenty-odd
    names is more than anyone should have to scroll through to find one. */
@@ -293,8 +334,9 @@ static size_t s_focus_cap;
  * Scratch for the text fields, one slot per field per frame.
  *
  * The worst case is the macro editor with a full chord: a name, a colour, a
- * phrase, a target and an application, sixteen steps with a timing each, the
- * key list's filter and a profile being renamed -- thirty-nine. Anything past
+ * phrase, sixteen steps with a timing each, the colour again on the wheel that
+ * floats over all of it, the key list's filter and a profile being renamed --
+ * thirty-eight. Anything past
  * the pool is drawn straight from the caller's buffer rather than being given
  * somebody else's slot, so running out costs a caret, not the wrong text.
  */
@@ -393,6 +435,40 @@ static bool ui_button(Clay_ElementId id, const char *label, bool primary,
     return hit;
 }
 
+/*
+ * A button for something that cannot be undone.
+ *
+ * Red throughout rather than only under the pointer: this is the one control
+ * in the editor that throws work away, and a button that looks ordinary until
+ * it is hovered has already been reached for by then. The outline goes white
+ * on hover, which is the only change left that red can still carry.
+ */
+static bool ui_danger_button(Clay_ElementId id, const char *label, bool enabled)
+{
+    bool hit = false;
+
+    CLAY(id, {
+        .layout = {
+            .sizing = { .width = CLAY_SIZING_FIT(0),
+                        .height = CLAY_SIZING_FIXED(38) },
+            .padding = { 14, 14, 8, 8 },
+            .childAlignment = { CLAY_ALIGN_X_CENTER, CLAY_ALIGN_Y_CENTER },
+        },
+        .backgroundColor = !enabled ? C_LINE
+                         : (Clay_Hovered() ? C_DANGER_HI : C_DANGER),
+        .cornerRadius = CLAY_CORNER_RADIUS(8),
+        .border = { .color = (enabled && Clay_Hovered())
+                           ? COL(0xff, 0xff, 0xff, 255) : C_BORDER,
+                    .width = { 1, 1, 1, 1 } },
+    }) {
+        hit = clicked(enabled);
+        CLAY_TEXT(dyn(label), CLAY_TEXT_CONFIG({
+            .fontId = FONT_BODY, .fontSize = FONT_SIZE_ITEM,
+            .textColor = enabled ? COL(0xff, 0xff, 0xff, 255) : C_MUTED }));
+    }
+    return hit;
+}
+
 static bool ui_checkbox(Clay_ElementId id, const char *label, bool *value)
 {
     bool hit = false;
@@ -479,6 +555,69 @@ static void ui_text_field(Clay_ElementId id, char *buffer, size_t cap,
     ui_text_field_sized(id, buffer, cap, font, submitted, 38.0f);
 }
 
+/*
+ * Copy and paste, for the colour field and nothing else.
+ *
+ * raylib hands over the clipboard but nothing that edits with it, and a hex
+ * code is the one value in this interface worth carrying in from another
+ * window: six digits read off one screen and typed into another is how they
+ * get mistyped. Every other field here is a name or a path that was picked
+ * rather than transcribed, and giving them all a chord would take ctrl+C off
+ * the traffic console for as long as anything at all had the focus.
+ *
+ * @param len The field's length, rewritten when text is put in.
+ * @return true when the keystroke was taken and the characters behind it
+ *         dropped, ctrl+V having to not also arrive as a letter v.
+ */
+static bool ui_hex_clipboard(size_t *len)
+{
+    if (!IsKeyDown(KEY_LEFT_CONTROL) && !IsKeyDown(KEY_RIGHT_CONTROL)) {
+        return false;
+    }
+
+    bool cut = IsKeyPressed(KEY_X);
+
+    if (cut || IsKeyPressed(KEY_C)) {
+        SetClipboardText(s_focus);
+
+        if (cut) {
+            s_focus[0] = '\0';
+            *len = 0;
+        }
+        while (GetCharPressed() > 0) {
+        }
+        return true;
+    }
+
+    if (!IsKeyPressed(KEY_V)) {
+        return false;
+    }
+
+    const char *paste = GetClipboardText();
+
+    /* Replaces rather than appends. There is no caret to insert at, and a
+       six-digit field that is already full could otherwise take nothing at
+       all, which is the whole case this exists for. A colour copied out of a
+       web page arrives as "#ff00aa", which keys_parse_hex() already accepts,
+       so the hash is left alone rather than second-guessed. */
+    *len = 0;
+    s_focus[0] = '\0';
+
+    for (; paste != NULL && *paste != 0 && *len + 1 < s_focus_cap; paste++) {
+        if (*paste == '\n' || *paste == '\r') {
+            break;
+        }
+        if (*paste >= 32 && *paste < 127) {
+            s_focus[(*len)++] = *paste;
+        }
+    }
+    s_focus[*len] = '\0';
+
+    while (GetCharPressed() > 0) {
+    }
+    return true;
+}
+
 static void ui_pump_text_input(void)
 {
     if (s_focus == NULL) {
@@ -486,6 +625,10 @@ static void ui_pump_text_input(void)
     }
 
     size_t len = strlen(s_focus);
+
+    if (s_focus == s_key_hex && ui_hex_clipboard(&len)) {
+        return;
+    }
 
     for (int c = GetCharPressed(); c > 0; c = GetCharPressed()) {
         if (c >= 32 && c < 127 && len + 1 < s_focus_cap) {
@@ -511,6 +654,32 @@ static void ui_pump_text_input(void)
  * field is deliberately not rewritten here -- app_set_rgb() would reformat it
  * mid-word and fight the caret.
  */
+/*
+ * The typed half of the same colour.
+ *
+ * The wheel and the brightness slider write s_key_hex as they move; the field
+ * beside them has to be able to write back, or a pasted code leaves the disc
+ * and the preview showing the colour before it. Only a value the wheel did not
+ * put there is parsed, and the field is never rewritten here -- that would
+ * reformat it mid-word and fight the caret.
+ */
+static void ui_key_hex_apply(void)
+{
+    if (strcmp(s_key_hex, s_key_hex_seen) == 0) {
+        return;
+    }
+    snprintf(s_key_hex_seen, sizeof(s_key_hex_seen), "%s", s_key_hex);
+
+    uint32_t rgb = 0;
+    if (!keys_parse_hex(s_key_hex, &rgb)) {
+        return;         /* still half typed */
+    }
+
+    app_rgb_to_hsv((uint8_t)((rgb >> 16) & 0xFF), (uint8_t)((rgb >> 8) & 0xFF),
+                   (uint8_t)(rgb & 0xFF), &s_key_wheel_h, &s_key_wheel_s,
+                   &s_key_wheel_v);
+}
+
 static void ui_hex_field_apply(app_t *app)
 {
     static char seen[APP_HEX_MAX];
@@ -599,19 +768,21 @@ static void ui_rebuild_wheel(float val)
  * corner would be rejected on its first frame but accepted on the next, because
  * IsMouseButtonPressed is only true once.
  */
-static bool s_wheel_active;
-
 /*
  * @param hue     Receives the angle under the pointer, 0..360.
  * @param sat     Receives the distance from the centre, 0..1.
+ * @param active  The caller's ownership of this drag. One flag per wheel: a
+ *                single shared one let a drag begun on the key's wheel be
+ *                inherited by the one on the other tab, since neither could
+ *                tell whose press it had been.
  * @param changed Set when either moved. Left alone otherwise, so several
  *                sources can be collected into one flag.
  */
 static void ui_wheel_interact(float *hue, float *sat, Clay_BoundingBox box,
-                              bool *changed)
+                              bool *active, bool *changed)
 {
     if (!IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
-        s_wheel_active = false;
+        *active = false;
         return;
     }
 
@@ -625,9 +796,9 @@ static void ui_wheel_interact(float *hue, float *sat, Clay_BoundingBox box,
     float dist = sqrtf(dx * dx + dy * dy);
 
     if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && dist <= radius) {
-        s_wheel_active = true;
+        *active = true;
     }
-    if (!s_wheel_active) {
+    if (!*active) {
         return;
     }
 
@@ -668,19 +839,39 @@ static void ui_draw_wheel_marker(float hue, float sat, float val,
  * Interaction only. The element is declared inside the layout; this reads the
  * box Clay recorded last frame, so it must run before Clay_BeginLayout().
  */
-static bool ui_slider(Clay_ElementId id, float *value)
+/*
+ * @param grab The caller's ownership of this drag, kept the same way the
+ *             wheel keeps its own.
+ *
+ * Two things were wrong without it. A drag begun on the colour wheel moved the
+ * brightness the moment it crossed the track, because being inside was the
+ * whole test; and a drag that left the track stopped following the pointer
+ * instead of staying held, so the value froze until the pointer came back.
+ */
+static bool ui_slider(Clay_ElementId id, float *value, bool *grab)
 {
+    if (!IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
+        *grab = false;
+        return false;
+    }
+
     Clay_ElementData data = Clay_GetElementData(id);
-    if (!data.found || !IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
+    if (!data.found) {
         return false;
     }
 
     Vector2 m = GetMousePosition();
     Clay_BoundingBox b = data.boundingBox;
 
-    bool inside = m.x >= b.x - 6.0f && m.x <= b.x + b.width + 6.0f &&
-                  m.y >= b.y - 8.0f && m.y <= b.y + b.height + 8.0f;
-    if (!inside) {
+    /* Wider than the track is drawn: five pixels of line is not what the
+       pointer is aiming at, the knob standing seven out from it either way. */
+    bool inside = m.x >= b.x - 8.0f && m.x <= b.x + b.width + 8.0f &&
+                  m.y >= b.y - 10.0f && m.y <= b.y + b.height + 10.0f;
+
+    if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && inside) {
+        *grab = true;
+    }
+    if (!*grab) {
         return false;
     }
 
@@ -1023,16 +1214,16 @@ static void ui_key_editor_open(app_t *app, int id)
     }
 
     s_key_editor = id;
+    s_key_delete = false;
     s_key_record = false;
     s_key_picker = false;
     s_key_wheel = false;
     snprintf(s_key_text, sizeof(s_key_text), "%s", binding->macro.text);
-    snprintf(s_key_media, sizeof(s_key_media), "%s", binding->macro.media);
-    snprintf(s_key_target, sizeof(s_key_target), "%s", binding->macro.target);
     s_focus = NULL;
     s_menu_open = false;
 
     keys_format_hex(binding->color, s_key_hex, sizeof(s_key_hex));
+    snprintf(s_key_hex_seen, sizeof(s_key_hex_seen), "%s", s_key_hex);
 
     for (int i = 0; i < KEYS_MACRO_MAX; i++) {
         snprintf(s_key_timing[i], sizeof(s_key_timing[i]), "%d",
@@ -1045,6 +1236,7 @@ static void ui_key_editor_open(app_t *app, int id)
 static void ui_key_editor_close(app_t *app)
 {
     s_key_editor = -1;
+    s_key_delete = false;
     s_key_record = false;
     s_key_picker = false;
     s_key_wheel = false;
@@ -1229,12 +1421,67 @@ static void ui_field_caption(const char *text)
     }
 }
 
+/*
+ * A value that was picked rather than typed, shown where a field would be.
+ *
+ * Not a disabled text field: there is nothing to edit here, and a field the
+ * caret never enters only invites the attempt. @p empty is what stands in
+ * when nothing is chosen, and it says what that means rather than leaving the
+ * box blank.
+ */
+static void ui_value_label(Clay_ElementId id, const char *value,
+                           const char *empty)
+{
+    bool set = (value[0] != 0);
+
+    CLAY(id, {
+        .layout = {
+            .sizing = { .width = CLAY_SIZING_GROW(0),
+                        .height = CLAY_SIZING_FIXED(38) },
+            .padding = { 12, 12, 8, 8 },
+            .childAlignment = { .y = CLAY_ALIGN_Y_CENTER },
+        },
+        .backgroundColor = C_FIELD,
+        .cornerRadius = CLAY_CORNER_RADIUS(8),
+        .border = { .color = C_BORDER, .width = { 1, 1, 1, 1 } },
+    }) {
+        CLAY_TEXT(dyn(set ? value : empty), CLAY_TEXT_CONFIG({
+            .fontId = FONT_BODY, .fontSize = FONT_SIZE_BODY,
+            .textColor = set ? C_FG : C_MUTED }));
+    }
+}
+
+/* The cross a recorded step carries, for taking any other value away. One
+   shape for one meaning, rather than a button whose label has to explain
+   which way round it works. */
+static bool ui_delete_cross(Clay_ElementId id, bool enabled)
+{
+    bool hit = false;
+
+    CLAY(id, {
+        .layout = {
+            .sizing = { CLAY_SIZING_FIXED(22), CLAY_SIZING_FIXED(22) },
+            .childAlignment = { CLAY_ALIGN_X_CENTER, CLAY_ALIGN_Y_CENTER },
+        },
+        .backgroundColor = (enabled && Clay_Hovered()) ? C_WARN : C_LINE,
+        .cornerRadius = CLAY_CORNER_RADIUS(4),
+    }) {
+        hit = clicked(enabled);
+        CLAY_TEXT(CLAY_STRING("x"), CLAY_TEXT_CONFIG({
+            .fontId = FONT_BODY, .fontSize = FONT_SIZE_SMALL,
+            .textColor = enabled ? C_FG : C_MUTED }));
+    }
+    return hit;
+}
+
 static void ui_key_editor_steps(keys_binding_t *binding)
 {
     CLAY(CLAY_ID("KeySteps"), {
         .layout = {
             .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(KEY_STEPS_H) },
-            .padding = CLAY_PADDING_ALL(6),
+            /* Right side wider than the rest: that is where the scrollbar is
+               drawn, and a row that reached the edge would sit under it. */
+            .padding = { 6, KEY_BAR_GUTTER, 6, 6 },
             .childGap = 4,
             .layoutDirection = CLAY_TOP_TO_BOTTOM,
         },
@@ -1340,7 +1587,8 @@ static void ui_key_editor_steps(keys_binding_t *binding)
                Clay keeps the pointer, so the text cannot be a local. */
             static char shown[96];
 
-            snprintf(shown, sizeof(shown), "play/pause %s",
+            snprintf(shown, sizeof(shown), "%s %s",
+                     media_action_label(binding->macro.media_action),
                      binding->macro.media);
 
             CLAY_TEXT(dyn(shown), CLAY_TEXT_CONFIG({
@@ -1490,8 +1738,7 @@ static void ui_key_editor(app_t *app)
                 binding->macro.text[0] = 0;
                 binding->macro.media[0] = 0;
                 binding->macro.target[0] = 0;
-                s_key_media[0] = 0;
-                s_key_target[0] = 0;
+                keys_macro_set_media_action(&binding->macro, MEDIA_PLAY_PAUSE);
             }
         }
 
@@ -1515,78 +1762,75 @@ static void ui_key_editor(app_t *app)
         }
 
         /*
-         * Where the chord goes. Empty is the desktop, which is what a macro
-         * has always done; named, the keys are posted to that program even
-         * while something else has the focus. It is the way to reach a player
-         * that answers its own space bar but tells Windows nothing, which is
-         * most of them.
+         * The one application this key is about, chosen rather than typed.
+         *
+         * It carries both meanings, because both are the same question: a
+         * chord is posted to that program's window instead of being typed at
+         * the desktop, and a media action addresses that program rather than
+         * whatever played last. Two fields for one application could disagree
+         * with each other, and one of them had to be filled in twice.
+         *
+         * Nothing chosen means the desktop, which the label now says outright.
+         * A button called "Desktop" left the reader to work out that it was
+         * the off switch for the field beside it.
          */
         UI_FIELD_ROW() {
-            ui_field_caption("Send to");
+            ui_field_caption("Execute keystroke in");
 
-            bool aimed = false;
-            ui_text_field(CLAY_ID("KeyTarget"), s_key_target,
-                          sizeof(s_key_target), FONT_BODY, &aimed);
+            ui_value_label(CLAY_ID("KeyTarget"), binding->macro.target,
+                           "desktop");
 
-            if (ui_button(CLAY_ID("KeyTargetPick"), "...", false,
+            if (ui_button(CLAY_ID("KeyTargetPick"), "Select app", false,
                           filedialog_available(), false)) {
                 char path[CONFIG_PATH_MAX];
 
                 if (filedialog_open_program("Choose an application", path,
                                             sizeof(path))) {
                     keys_macro_set_target(&binding->macro, path);
-                    snprintf(s_key_target, sizeof(s_key_target), "%s",
-                             binding->macro.target);
                 }
             }
 
-            if (ui_button(CLAY_ID("KeyTargetSet"), "Aim", false,
-                          s_key_target[0] != 0, false) || aimed) {
-                keys_macro_set_target(&binding->macro, s_key_target);
-                snprintf(s_key_target, sizeof(s_key_target), "%s",
-                         binding->macro.target);
-            }
-
-            if (ui_button(CLAY_ID("KeyTargetClear"), "Desktop", false,
-                          binding->macro.target[0] != 0, false)) {
+            if (ui_delete_cross(CLAY_ID("KeyTargetClear"),
+                                binding->macro.target[0] != 0)) {
                 keys_macro_set_target(&binding->macro, "");
-                s_key_target[0] = 0;
             }
         }
 
         /*
-         * Play/pause for one named application. A media key is global and
-         * lands on whichever program played last, so the only way to mean
-         * this one rather than that one is to say which.
+         * What that application is told to do, if anything.
+         *
+         * Each of these addresses the named program alone -- its session on
+         * Windows, its MPRIS interface on Linux -- rather than going out as
+         * the global media key, which is the whole reason the row above names
+         * an application at all.
+         *
+         * Choosing one makes this a media key, and the kinds are exclusive,
+         * so the recorded steps go -- exactly as recording a step takes the
+         * media away again. Nothing is lit until one is chosen, which is how
+         * a chord aimed at an application tells itself apart from a media
+         * action on the same one.
          */
         UI_FIELD_ROW() {
-            ui_field_caption("Media");
+            ui_field_caption("Media action");
 
-            bool entered = false;
-            ui_text_field(CLAY_ID("KeyMedia"), s_key_media, sizeof(s_key_media),
-                          FONT_BODY, &entered);
+            bool chosen = (binding->macro.media[0] != 0);
 
-            if (ui_button(CLAY_ID("KeyMediaPick"), "...", false,
-                          filedialog_available(), false)) {
-                char path[CONFIG_PATH_MAX];
+            for (int i = 0; i < MEDIA_ACTION_COUNT; i++) {
+                media_action_t action = (media_action_t)i;
 
-                if (filedialog_open_program("Choose an application", path,
-                                            sizeof(path))) {
-                    /* Only the file name survives: that is what the program
-                       can be found by once it is running. */
-                    keys_macro_set_media(&binding->macro, path);
-                    snprintf(s_key_media, sizeof(s_key_media), "%s",
-                             binding->macro.media);
+                /* Lit rather than merely chosen: with the pad's own colours
+                   nearby, the accent is the only unambiguous "this one". */
+                if (ui_button(CLAY_IDI("KeyMediaAction", i),
+                              media_action_label(action),
+                              chosen && binding->macro.media_action == action,
+                              binding->macro.target[0] != 0, false)) {
+                    /* Reads the target and writes the media name, which
+                       keys_macro_set_media() then copies back over the target
+                       unchanged: same application, both names. */
+                    keys_macro_set_media(&binding->macro,
+                                         binding->macro.target);
+                    keys_macro_set_media_action(&binding->macro, action);
                 }
-            }
-
-            bool named = (s_key_media[0] != 0);
-
-            if (ui_button(CLAY_ID("KeySetMedia"), "Use app", false, named,
-                          false) || (entered && named)) {
-                keys_macro_set_media(&binding->macro, s_key_media);
-                snprintf(s_key_media, sizeof(s_key_media), "%s",
-                         binding->macro.media);
             }
         }
 
@@ -1597,7 +1841,7 @@ static void ui_key_editor(app_t *app)
                 .fontId = FONT_BODY, .fontSize = FONT_SIZE_SMALL, .textColor = C_WARN }));
         } else {
             CLAY_TEXT(dyn(binding->macro.media[0]
-                          ? "this key starts and stops that application, "
+                          ? "this key drives that application alone, "
                             "whatever else is playing"
                           : binding->macro.target[0]
                           ? "sent to that application's window; modifiers do "
@@ -1606,6 +1850,25 @@ static void ui_key_editor(app_t *app)
                             "the wait comes before each step"),
                       CLAY_TEXT_CONFIG({ .fontId = FONT_BODY, .fontSize = FONT_SIZE_SMALL,
                                          .textColor = C_MUTED }));
+        }
+
+        /*
+         * Last, on its own line and hard right: the whole key, on this profile
+         * only, put back to unbound. Kept as far from Close as the panel
+         * allows, the two being next to each other in a list of things to
+         * click at the end.
+         */
+        UI_FIELD_ROW() {
+            CLAY_AUTO_ID({ .layout = { .sizing = { CLAY_SIZING_GROW(0) } } }) {}
+
+            if (ui_danger_button(CLAY_ID("KeyDelete"), "Delete macro",
+                                 !keys_binding_empty(binding))) {
+                s_key_delete = true;
+
+                /* The colour panel would be left floating over the question,
+                   and its wheel still taking the pointer behind it. */
+                s_key_wheel = false;
+            }
         }
     }
 }
@@ -1698,9 +1961,85 @@ static void ui_key_colour_picker(void)
                     .border = { .color = C_BORDER, .width = { 1, 1, 1, 1 } },
                 }) {}
 
-                CLAY_TEXT(dyn(s_key_hex), CLAY_TEXT_CONFIG({
-                    .fontId = FONT_MONO, .fontSize = FONT_SIZE_BODY,
-                    .textColor = C_FG }));
+                /* Editable, so a code can be pasted in rather than hunted
+                   for on the disc by eye. The wheel writes this as it moves
+                   and ui_key_hex_apply() reads it back, so the two are one
+                   value approached from either end. */
+                ui_text_field(CLAY_ID("KeyWheelHex"), s_key_hex,
+                              sizeof(s_key_hex), FONT_MONO, NULL);
+            }
+        }
+    }
+}
+
+/*
+ * The one thing in the editor worth asking about first.
+ *
+ * Floats above both the editor and the colour panel, and answering it either
+ * way is the only way out: there is nothing to click through to, because
+ * everything underneath is what the question is about.
+ */
+static void ui_key_delete_confirm(app_t *app)
+{
+    if (!s_key_delete || s_key_editor < 0) {
+        return;
+    }
+
+    keys_binding_t *binding = keys_binding(&app->keys, s_key_editor,
+                                           app->keys.profile);
+    if (binding == NULL) {
+        s_key_delete = false;
+        return;
+    }
+
+    /* Clay keeps the pointer rather than a copy, so neither can be a local.
+       The room for the profile's name comes from the macro its field is
+       declared with: a const size_t is not a constant expression in C, so it
+       cannot give an array its size, which is what this used to try. */
+    static char question[16];
+    static char note[KEYS_PROFILE_NAME_MAX + 64];
+
+    snprintf(question, sizeof(question), "Delete macro ?");
+    snprintf(note, sizeof(note),
+             "Deletes it only for this profile: \"%s\"",
+             app->keys.profiles[app->keys.profile].name);
+
+    CLAY(CLAY_ID("KeyDeleteAsk"), {
+        .layout = {
+            .sizing = { CLAY_SIZING_FIXED(KEY_CONFIRM_W), CLAY_SIZING_FIT(0) },
+            .padding = CLAY_PADDING_ALL(16),
+            .childGap = 12,
+            .layoutDirection = CLAY_TOP_TO_BOTTOM,
+        },
+        .backgroundColor = C_CARD,
+        .cornerRadius = CLAY_CORNER_RADIUS(12),
+        .border = { .color = C_DANGER, .width = { 1, 1, 1, 1 } },
+        .floating = {
+            .attachTo = CLAY_ATTACH_TO_ROOT,
+            .attachPoints = { CLAY_ATTACH_POINT_CENTER_CENTER,
+                              CLAY_ATTACH_POINT_CENTER_CENTER },
+            .zIndex = 60,
+        },
+    }) {
+        CLAY_TEXT(dyn(question), CLAY_TEXT_CONFIG({
+            .fontId = FONT_BODY, .fontSize = FONT_SIZE_NOTICE,
+            .textColor = C_FG }));
+
+        CLAY_TEXT(dyn(note), CLAY_TEXT_CONFIG({
+            .fontId = FONT_BODY, .fontSize = FONT_SIZE_SMALL,
+            .textColor = C_MUTED }));
+
+        UI_FIELD_ROW() {
+            CLAY_AUTO_ID({ .layout = { .sizing = { CLAY_SIZING_GROW(0) } } }) {}
+
+            if (ui_button(CLAY_ID("KeyDeleteNo"), "Cancel", false, true,
+                          false)) {
+                s_key_delete = false;
+            }
+
+            if (ui_danger_button(CLAY_ID("KeyDeleteYes"), "Delete", true)) {
+                keys_binding_clear(binding);
+                ui_key_editor_close(app);
             }
         }
     }
@@ -1843,6 +2182,22 @@ static void ui_profiles_card(app_t *app)
     UI_CARD_MIN(CLAY_ID("ProfilesCard"), PROFILES_MIN_W) {
         ui_card_title("PROFILES");
 
+        /* Scrolls once there are more than a handful. The card is laid out
+           FIT, and the configuration tab it sits on does not scroll, so
+           without this the rows past the bottom of the window simply could
+           not be reached. */
+        CLAY(CLAY_ID("ProfileRows"), {
+            .layout = {
+                .sizing = { CLAY_SIZING_GROW(0),
+                            CLAY_SIZING_FIT(0, PROFILES_MAX_H) },
+                /* Right side wider: that is where the scrollbar is drawn, and
+                   a row reaching the edge would sit under it. */
+                .padding = { 0, KEY_BAR_GUTTER, 0, 0 },
+                .childGap = 8,
+                .layoutDirection = CLAY_TOP_TO_BOTTOM,
+            },
+            .clip = { .vertical = true, .childOffset = Clay_GetScrollOffset() },
+        }) {
         for (int p = 0; p < keys->profile_count; p++) {
             bool active = (keys->profile == p);
 
@@ -1975,7 +2330,10 @@ static void ui_profiles_card(app_t *app)
                 }
             }
         }
+        }   /* ProfileRows */
 
+        /* Outside the scrolling part, so it stays put however long the list
+           gets. */
         if (ui_button(CLAY_ID("ProfilesAdd"), "+ Profile", true,
                       keys->profile_count < KEYS_PROFILES_MAX, false)) {
             int index = keys_add_profile(keys, NULL);
@@ -2460,6 +2818,7 @@ static void ui_tab_bar(void)
                     s_key_record = false;
                     s_key_editor = -1;
                     s_key_wheel = false;
+                    s_key_delete = false;
                     s_picker = -1;
                     s_focus = NULL;
                 }
@@ -2785,7 +3144,6 @@ static void ui_autoscroll_log(const app_t *app, Clay_ElementId id)
 /* ------------------------------------------------------- log selection --- */
 
 #define LOG_PAD         8.0f
-#define LOG_BAR_W       10.0f
 
 /*
  * Characters of a log line that fit across the panel, or 0 before it has been
@@ -2883,6 +3241,10 @@ typedef struct {
 
 static ui_bar_t s_log_bar;
 static ui_bar_t s_step_bar;
+
+/* Its own rather than sharing s_step_bar: the application picker floats over
+   this card and uses that one, and the two would inherit each other's drag. */
+static ui_bar_t s_profile_bar;
 
 /*
  * The entry at @p y, measured down from the top of the scrolled content.
@@ -3078,7 +3440,11 @@ static void ui_log_interact(const app_t *app)
         s_log_selecting = false;
     }
 
-    bool ctrl = IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL);
+    /* The colour field owns this chord while it has the focus, ui_hex_clipboard()
+       using the same one; whichever ran second would take the clipboard off
+       the one the user meant. */
+    bool ctrl = (IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL)) &&
+                s_focus != s_key_hex;
 
     if (ctrl && IsKeyPressed(KEY_A) && app->log_count > 0) {
         s_log_from = 0;
@@ -3496,6 +3862,12 @@ int ui_run(app_t *app)
         ui_hex_field_apply(app);
         ui_led_hex_apply(app);
 
+        /* Before the wheel is rebuilt below, so a code typed this frame is the
+           brightness the texture is generated at. */
+        if (s_key_wheel) {
+            ui_key_hex_apply();
+        }
+
         /* One texture, and never two wheels on screen at once: whichever is up
            is the one it is drawn for. */
         ui_rebuild_wheel(s_key_wheel ? s_key_wheel_v : app->val);
@@ -3562,8 +3934,17 @@ int ui_run(app_t *app)
         ui_log_measure();
         ui_log_interact(app);
 
-        if (s_key_editor >= 0 && !s_key_picker) {
+        /* Not while the colour panel or the question is up: both float over
+           the step list, and a scrollbar underneath a panel must not still
+           take the drag. */
+        if (s_key_editor >= 0 && !s_key_picker && !s_key_wheel &&
+            !s_key_delete) {
             ui_bar_interact(CLAY_ID("KeySteps"), &s_step_bar);
+        }
+        /* Not while the application picker is over it, that being the one
+           thing on this tab that floats above the card. */
+        if (s_tab == TAB_CONFIG && s_picker < 0) {
+            ui_bar_interact(CLAY_ID("ProfileRows"), &s_profile_bar);
         }
         if (s_key_picker) {
             ui_bar_interact(CLAY_ID("KeyNameRows"), &s_step_bar);
@@ -3619,7 +4000,7 @@ int ui_run(app_t *app)
         if (s_tab == TAB_CONFIG && wheel_data.found && !menu_blocks &&
             !editor_blocks) {
             ui_wheel_interact(&app->hue, &app->sat, wheel_data.boundingBox,
-                              &colour_changed);
+                              &s_wheel_grab, &colour_changed);
             if (colour_changed) {
                 app_sync_hex(app);
             }
@@ -3633,9 +4014,11 @@ int ui_run(app_t *app)
 
             if (key_wheel.found && !menu_blocks) {
                 ui_wheel_interact(&s_key_wheel_h, &s_key_wheel_s,
-                                  key_wheel.boundingBox, &key_colour_changed);
+                                  key_wheel.boundingBox, &s_key_wheel_grab,
+                                  &key_colour_changed);
             }
-            if (!menu_blocks && ui_slider(CLAY_ID("KeyBright"), &s_key_wheel_v)) {
+            if (!menu_blocks && ui_slider(CLAY_ID("KeyBright"), &s_key_wheel_v,
+                                          &s_key_bright_grab)) {
                 key_colour_changed = true;
             }
 
@@ -3646,6 +4029,13 @@ int ui_run(app_t *app)
                                &r, &g, &b);
                 keys_format_hex(((uint32_t)r << 16) | ((uint32_t)g << 8) | b,
                                 s_key_hex, sizeof(s_key_hex));
+
+                /* Recorded as the wheel's own, so the field is not read back
+                   as if it had been typed: HSV to RGB and round again does not
+                   land where it started, and the disc would creep under a
+                   drag that never left one hue. */
+                snprintf(s_key_hex_seen, sizeof(s_key_hex_seen), "%s",
+                         s_key_hex);
             }
         }
         if (app->slider_extern_seq != slider_extern_seen) {
@@ -3690,7 +4080,7 @@ int ui_run(app_t *app)
         }
 
         if (s_tab == TAB_CONFIG && !menu_blocks && !editor_blocks &&
-            ui_slider(slider_id, &app->val)) {
+            ui_slider(slider_id, &app->val, &s_bright_grab)) {
             colour_changed = true;
             app_sync_hex(app);
         }
@@ -3698,7 +4088,8 @@ int ui_run(app_t *app)
         /* Not part of the colour: it scales every state the device shows,
            and is sent with them rather than as it moves. */
         if (s_tab == TAB_CONFIG && !menu_blocks && !editor_blocks) {
-            ui_slider(CLAY_ID("LedBrightness"), &app->led_brightness);
+            ui_slider(CLAY_ID("LedBrightness"), &app->led_brightness,
+                      &s_led_bright_grab);
         }
 
         /* A state slot that has been picked is where the wheel writes; with
@@ -4122,6 +4513,7 @@ int ui_run(app_t *app)
                can be open: they live on different tabs. */
             ui_key_editor(app);
             ui_key_colour_picker();
+            ui_key_delete_confirm(app);
             ui_key_name_picker(app);
             ui_app_picker(app);
         }
@@ -4296,6 +4688,9 @@ int ui_run(app_t *app)
         }
         if (s_picker >= 0) {
             ui_bar_draw(CLAY_ID("PickerRows"), &s_step_bar);
+        }
+        if (s_tab == TAB_CONFIG) {
+            ui_bar_draw(CLAY_ID("ProfileRows"), &s_profile_bar);
         }
 
         ui_draw_fps(app);

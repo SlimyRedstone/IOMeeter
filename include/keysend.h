@@ -32,6 +32,9 @@
 
 #include <stdbool.h>
 
+/* For media_action_t: a media macro presses no key, but it rides this queue. */
+#include "media.h"
+
 /* Steps in one chord, the longest key name, and the longest phrase. All three
    match the limits keys.h stores, which is where every macro comes from. */
 #define KEYSEND_STEPS_MAX 16
@@ -95,15 +98,16 @@ unsigned keysend_failures(void);
 const char *keysend_failure(void);
 
 /**
- * Start or stop one application playing, as a macro with no keystroke in it.
+ * Drive one application's playback, as a macro with no keystroke in it.
  *
  * Queued like any other macro, because the search it does is slow enough to
  * be worth keeping off the thread that noticed the key.
  *
- * @param app Executable name or path; see media.h for how it is matched.
+ * @param app    Executable name or path; see media.h for how it is matched.
+ * @param action What the application is told to do.
  * @return false when the queue is full or nothing is running yet.
  */
-bool keysend_play_media(const char *app);
+bool keysend_play_media(const char *app, media_action_t action);
 
 /**
  * Queue a phrase to be typed, and return immediately.

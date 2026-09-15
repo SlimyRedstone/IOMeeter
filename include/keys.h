@@ -27,15 +27,20 @@
  * chord: each entry is pressed in order, waiting its timing first, and they
  * are released in the reverse order afterwards, under the names keysend.h
  * accepts. With "text" it is a phrase, typed out as it stands. With "media"
- * it is the name of an application whose playback the key toggles, which is
- * not a keystroke at all -- a media key is global and lands on whichever
- * program played last, so naming one is the only way to reach it. An entry
- * carrying none of the three is rejected and reported.
+ * it is the name of an application the key drives, which is not a keystroke
+ * at all -- a media key is global and lands on whichever program played last,
+ * so naming one is the only way to reach it. "action" then says which of
+ * play/pause, next, previous and stop it is told to do, and an entry without
+ * one means play/pause, which is what every file written before it meant. An
+ * entry carrying none of the three is rejected and reported.
  *
- * A chord may also carry "target", the application its keys are delivered to
- * instead of to the desktop. That is how a program which publishes no media
- * session is reached: VLC toggles on its own space bar, so a chord of SPACE
- * aimed at it pauses that window and nothing else.
+ * "target" is the application the key is about, and both kinds use it: a chord
+ * carrying one is delivered to that program's window instead of to the
+ * desktop, and a media entry is the same application under its other name, so
+ * a "media" entry read from a file comes back with "target" set to match. That
+ * is how a program which publishes no media session is still reached: VLC
+ * toggles on its own space bar, so a chord of SPACE aimed at it pauses that
+ * window and nothing else.
  *
  * Not thread safe; call from one thread.
  */
@@ -46,6 +51,9 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+
+/* For media_action_t: what the key tells that application to do. */
+#include "media.h"
 
 /* Declared rather than included: this header is pulled in by the interface,
    which has no business seeing the JSON library. */
@@ -58,7 +66,7 @@ struct cJSON;
 /* Twenty-four characters, as specified, plus the terminator. */
 #define KEYS_NAME_MAX           25
 
-#define KEYS_PROFILES_MAX       8
+#define KEYS_PROFILES_MAX       32
 #define KEYS_PROFILE_NAME_MAX   24
 
 /* Applications that select a profile, and the room their paths need. The
@@ -102,6 +110,10 @@ typedef struct {
      * identity the faders address an application with.
      */
     char media[KEYS_APP_NAME_MAX];
+
+    /* What that application is told to do. Only meaningful while "media" is
+       set, and play/pause until something else is chosen. */
+    media_action_t media_action;
 
     /*
      * Where the chord above is delivered. Empty means the desktop, which is
@@ -158,7 +170,22 @@ keys_binding_t *keys_binding(keys_t *k, int id, int profile);
 /** As keys_binding(), for a pad that must not be modified. */
 const keys_binding_t *keys_binding_const(const keys_t *k, int id, int profile);
 
-/** True when nothing has been set on @p b, so it need not be written out. */
+/**
+ * Put @p b back to an unbound key: no name, no colour, no macro of any kind.
+ *
+ * What "unbound" means lives here rather than at the call site, next to
+ * keys_binding_empty(), which is the same rule read the other way round: a
+ * cleared binding is an empty one.
+ */
+void keys_binding_clear(keys_binding_t *b);
+
+/**
+ * True when nothing has been set on @p b, so it need not be written out.
+ *
+ * A named application counts even with no steps behind it yet: it is chosen in
+ * the editor before the macro is recorded, and dropping it here would lose it
+ * the moment the editor closed.
+ */
 bool keys_binding_empty(const keys_binding_t *b);
 
 /**
@@ -219,8 +246,12 @@ int keys_default_profile(const keys_t *k);
 void keys_macro_set_text(keys_macro_t *m, const char *text);
 
 /**
- * Give a macro an application whose playback it toggles, in place of whatever
- * it held.
+ * Give a macro an application it drives, in place of whatever it held.
+ *
+ * The steps and any phrase go, the three kinds being exclusive, but the action
+ * is left alone so that choosing a different application does not quietly put
+ * the key back to play/pause. keys_macro_set_target() is called for the same
+ * name, so both fields always name the one application.
  *
  * @param app A name or a full path; only the file name at the end of it is
  *            kept, since that is what a running program can be matched by.
@@ -229,7 +260,18 @@ void keys_macro_set_text(keys_macro_t *m, const char *text);
 void keys_macro_set_media(keys_macro_t *m, const char *app);
 
 /**
- * Aim a chord at one application, or at the desktop again.
+ * Say what the application named by keys_macro_set_media() is told to do.
+ *
+ * @param action Out of range is taken as play/pause.
+ */
+void keys_macro_set_media_action(keys_macro_t *m, media_action_t action);
+
+/**
+ * Name the application the key is about, or take the name away again.
+ *
+ * A macro that is already a media one has its "media" name kept in step, the
+ * two being the same application; emptying the name therefore also ends its
+ * being a media macro, there being nothing left for the action to address.
  *
  * @param app A name or a full path, of which only the file name is kept, or
  *            an empty string to send the chord the ordinary way.

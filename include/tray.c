@@ -80,6 +80,44 @@ static LRESULT CALLBACK tray_wndproc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM 
 }
 
 /*
+ * Stop Windows from standing in for the window while the loop is busy.
+ *
+ * A top-level window that has not taken a message for five seconds counts as
+ * hung, and the desktop hides it behind a look-alike of class "Ghost" titled
+ * "... (Not Responding)" so the rest of the screen stays usable. When the real
+ * window answers again the ghost is destroyed and the real one comes back, and
+ * that swap is the flicker: nothing has actually crashed.
+ *
+ * The interface earns this honestly, and not by being slow. Both the tray menu
+ * below and dragging the window run a modal loop of the system's own inside
+ * the message pump, and neither returns until the user is finished with it --
+ * so no frame is drawn, and past five seconds the ghost appears. There is
+ * nothing to fix in the frame itself, so the stand-in is what goes.
+ *
+ * Turning it off leaves a genuinely wedged window simply frozen instead of
+ * captioned, which is the trade: the watchdog in watchdog.h is what says where
+ * a real hang was, and it says it to a file rather than to a title bar.
+ *
+ * Fetched rather than called outright -- MinGW's import library does not
+ * always carry it, and a missing stand-in is not worth failing to start over.
+ */
+static void disable_ghosting(void)
+{
+    HMODULE user32 = GetModuleHandleA("user32.dll");
+    if (user32 == NULL) {
+        return;
+    }
+
+    typedef void (WINAPI *disable_fn)(void);
+    disable_fn disable = (disable_fn)(void (*)(void))
+        GetProcAddress(user32, "DisableProcessWindowsGhosting");
+
+    if (disable != NULL) {
+        disable();
+    }
+}
+
+/*
  * The close button must not end the program: it hides to the notification area
  * instead, and only the tray menu really quits.
  *
@@ -99,6 +137,10 @@ static LRESULT CALLBACK app_window_proc(HWND hwnd, UINT msg, WPARAM wparam,
 bool tray_init(void *window_handle, const char *icon_path, const char *tooltip)
 {
     s_app_window = (HWND)window_handle;
+
+    /* Before the tray icon exists, since its menu is one of the two things
+       that stall the loop long enough for a ghost to appear. */
+    disable_ghosting();
 
     /* LR_LOADFROMFILE keeps this independent of the executable's resources,
        so the .ico simply ships beside the binary. */

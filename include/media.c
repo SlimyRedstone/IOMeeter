@@ -48,6 +48,56 @@ const char *media_last_error(void)
     return s_error;
 }
 
+/* ------------------------------------------------------------- actions --- */
+
+/*
+ * One row per action, in the order of the enum.
+ *
+ * The three names are kept together because they have to agree: the label is
+ * what the pad shows, the id is what config.json stores, and the MPRIS method
+ * is what the name means on the session bus. Windows has no column here, its
+ * sessions being addressed by a vtable slot rather than by name.
+ */
+static const struct {
+    const char *label;
+    const char *id;
+    const char *mpris;
+} s_actions[MEDIA_ACTION_COUNT] = {
+    { "Play/Pause", "playpause", "PlayPause" },
+    { "Next",       "next",      "Next"      },
+    { "Prev",       "previous",  "Previous"  },
+    { "Stop",       "stop",      "Stop"      },
+};
+
+static bool action_valid(media_action_t action)
+{
+    return (int)action >= 0 && (int)action < MEDIA_ACTION_COUNT;
+}
+
+const char *media_action_label(media_action_t action)
+{
+    return action_valid(action) ? s_actions[action].label
+                                : s_actions[MEDIA_PLAY_PAUSE].label;
+}
+
+const char *media_action_id(media_action_t action)
+{
+    return action_valid(action) ? s_actions[action].id
+                                : s_actions[MEDIA_PLAY_PAUSE].id;
+}
+
+media_action_t media_action_parse(const char *name)
+{
+    if (name != NULL) {
+        for (int i = 0; i < MEDIA_ACTION_COUNT; i++) {
+            if (strcmp(name, s_actions[i].id) == 0) {
+                return (media_action_t)i;
+            }
+        }
+    }
+    return MEDIA_PLAY_PAUSE;
+}
+
 /* ------------------------------------------------------------- matching --- */
 
 /* The file name at the end of a path, which is all an application is known by
@@ -383,7 +433,28 @@ static void manager_forget(void)
     s_manager = NULL;
 }
 
-bool media_toggle(const char *app)
+/*
+ * The call that carries @p action, which is a different slot for each.
+ *
+ * Every one of them is asynchronous and every one answers with whether the
+ * session took it, so the caller handles them all the same way once the right
+ * one has been picked.
+ */
+static HRESULT session_command(rt_session *session, media_action_t action,
+                               rt_async **op)
+{
+    switch (action) {
+    case MEDIA_NEXT:     return session->lpVtbl->TrySkipNextAsync(session, op);
+    case MEDIA_PREVIOUS: return session->lpVtbl->TrySkipPreviousAsync(session, op);
+    case MEDIA_STOP:     return session->lpVtbl->TryStopAsync(session, op);
+
+    case MEDIA_PLAY_PAUSE:
+    default:
+        return session->lpVtbl->TryTogglePlayPauseAsync(session, op);
+    }
+}
+
+bool media_command(const char *app, media_action_t action)
 {
     s_error[0] = 0;
 
@@ -447,7 +518,7 @@ bool media_toggle(const char *app)
         if (session_is(label, app)) {
             rt_async *op = NULL;
 
-            if (SUCCEEDED(session->lpVtbl->TryTogglePlayPauseAsync(session, &op)) &&
+            if (SUCCEEDED(session_command(session, action, &op)) &&
                 op != NULL) {
                 boolean taken = 0;
                 HRESULT result = rt_await(op, &taken);
@@ -583,7 +654,7 @@ bool media_available(void)
            getenv("XDG_RUNTIME_DIR") != NULL;
 }
 
-bool media_toggle(const char *app)
+bool media_command(const char *app, media_action_t action)
 {
     s_error[0] = 0;
 
@@ -603,12 +674,17 @@ bool media_toggle(const char *app)
         return false;
     }
 
+    /* Every action is a method of the same name on the same interface, so
+       naming it is the whole of the difference between them. */
+    const char *method = action_valid(action) ? s_actions[action].mpris
+                                              : s_actions[MEDIA_PLAY_PAUSE].mpris;
+
     char command[512];
     snprintf(command, sizeof(command),
              "dbus-send --session --dest=%s --type=method_call"
              " /org/mpris/MediaPlayer2"
-             " org.mpris.MediaPlayer2.Player.PlayPause 2>/dev/null",
-             player);
+             " org.mpris.MediaPlayer2.Player.%s 2>/dev/null",
+             player, method);
 
     char reply[256];
     if (!run(command, reply, sizeof(reply))) {

@@ -212,9 +212,10 @@ typedef struct {
     int  timings[KEYSEND_STEPS_MAX];
     int  count;
 
-    /* Set instead of the steps: an application to start or stop playing,
-       which is a macro in every way except that no key is pressed. */
-    char media[KEYSEND_APP_MAX];
+    /* Set instead of the steps: an application to drive, which is a macro in
+       every way except that no key is pressed, and what to tell it. */
+    char           media[KEYSEND_APP_MAX];
+    media_action_t media_action;
 
     /* Where the steps go. Empty is the desktop, which is what every macro
        did before there was anywhere else to send them. */
@@ -735,7 +736,7 @@ static void play(const job_t *job)
      * frame if it were done where the press was noticed.
      */
     if (job->media[0] != 0) {
-        media_toggle(job->media);
+        media_command(job->media, job->media_action);
         return;
     }
 
@@ -975,7 +976,7 @@ bool keysend_play_text(const char *text, int delay_ms)
     return enqueue(&job);
 }
 
-bool keysend_play_media(const char *app)
+bool keysend_play_media(const char *app, media_action_t action)
 {
     if (!s_running || app == NULL || app[0] == 0) {
         return false;
@@ -987,6 +988,7 @@ bool keysend_play_media(const char *app)
     job_t job;
     memset(&job, 0, sizeof(job));
     snprintf(job.media, KEYSEND_APP_MAX, "%s", app);
+    job.media_action = action;
 
     return enqueue(&job);
 }

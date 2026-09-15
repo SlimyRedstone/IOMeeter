@@ -89,3 +89,7 @@ Desktop.ini
 
 # Scratch notes and transcripts, not part of the project
 tests/
+
+# Per-session records written when a session is ended, local to this machine
+CHANGES.md
+BUGS.md

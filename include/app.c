@@ -1071,12 +1071,14 @@ bool app_key_press(app_t *a, int id)
      * pause. It rides the same queue because the search it does is slow.
      */
     if (binding->macro.media[0] != 0) {
-        if (!keysend_play_media(binding->macro.media)) {
+        if (!keysend_play_media(binding->macro.media,
+                                binding->macro.media_action)) {
             app_log(a, APP_LOG_ERROR, "macro queue is full");
             return false;
         }
         a->key_press_at[id]++;
-        app_log(a, APP_LOG_EVENT, "key %d: play/pause %s", id,
+        app_log(a, APP_LOG_EVENT, "key %d: %s %s", id,
+                media_action_label(binding->macro.media_action),
                 binding->macro.media);
         return true;
     }
