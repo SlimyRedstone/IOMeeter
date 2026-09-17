@@ -34,6 +34,12 @@ SYSTEMD_DIR="$HOME/.config/systemd/user"
 SERVICE_NAME="IOMeeter.service"
 SERVICE_FILE="$SYSTEMD_DIR/$SERVICE_NAME"
 WANT_SERVICE=1
+
+# The unit is only ever reached on desktops that run their session under
+# systemd. XDG autostart is what every desktop implements, so it is what
+# actually triggers the unit; autostart.sh is the two lines in between.
+AUTOSTART_DIR="$HOME/.config/autostart"
+AUTOSTART_FILE="$AUTOSTART_DIR/IOMeeter.desktop"
 THEME_DIR="$HOME/.local/share/icons/hicolor"
 ICON_DIR="$THEME_DIR/128x128/apps"
 
@@ -225,7 +231,13 @@ check)
             echo "graphical-session.target: active"
         else
             echo "graphical-session.target: NOT active -- this desktop does not"
-            echo "  reach it, so nothing wanted by it will ever start."
+            echo "  reach it, so nothing wanted by it starts on its own."
+            if [ -f "$AUTOSTART_FILE" ]; then
+                echo "  The autostart entry is what starts it instead."
+            else
+                echo "  And the autostart entry that would start it anyway is"
+                echo "  MISSING. Re-run ./install.sh."
+            fi
         fi
 
         if systemctl --user show-environment 2>/dev/null |
@@ -254,12 +266,12 @@ uninstall)
     if have_user_systemd && [ -f "$SERVICE_FILE" ]; then
         systemctl --user disable --now "$SERVICE_NAME" >/dev/null 2>&1
     fi
-    rm -f "$SERVICE_FILE"
+    rm -f "$SERVICE_FILE" "$AUTOSTART_FILE"
     if have_user_systemd; then
         systemctl --user daemon-reload >/dev/null 2>&1
     fi
 
-    rm -f "$BIN" "$DESKTOP_FILE" "$ICON_DIR/iomeeter.png"
+    rm -f "$BIN" "$DESKTOP_FILE" "$ICON_DIR/iomeeter.png" "$TARGET/autostart.sh"
     rm -rf "$TARGET/resources"
     refresh_caches
 
@@ -391,9 +403,17 @@ sed -e "s|@BIN@|$BIN|" -e "s|@DATA@|$TARGET|" \
     resources/IOMeeter.desktop > "$DESKTOP_FILE" || exit 1
 chmod 644 "$DESKTOP_FILE"
 
+# Started by the desktop, not by systemd, which is the point of it.
+install -m 755 resources/autostart.sh "$TARGET/autostart.sh" || exit 1
+
 # The same two substitutions as the launcher: a unit file expands neither
 # $HOME nor a relative path in ExecStart.
 if [ "$WANT_SERVICE" -eq 1 ]; then
+    mkdir -p "$AUTOSTART_DIR" || exit 1
+    sed -e "s|@DATA@|$TARGET|" \
+        resources/IOMeeter-autostart.desktop > "$AUTOSTART_FILE" || exit 1
+    chmod 644 "$AUTOSTART_FILE"
+
     if have_user_systemd; then
         mkdir -p "$SYSTEMD_DIR" || exit 1
         sed -e "s|@BIN@|$BIN|" -e "s|@DATA@|$TARGET|" \
@@ -418,9 +438,12 @@ if [ "$WANT_SERVICE" -eq 1 ]; then
         systemctl --user import-environment \
             DISPLAY XAUTHORITY WAYLAND_DISPLAY XDG_SESSION_TYPE 2>/dev/null
     else
-        SERVICE_STATE="skipped: no systemd user manager on this session"
+        # autostart.sh falls back to running the binary itself, so login
+        # still works; there is simply no unit behind it.
+        SERVICE_STATE="autostart only, no systemd user manager on this session"
     fi
 else
+    rm -f "$AUTOSTART_FILE"
     SERVICE_STATE="skipped: --no-service"
 fi
 
@@ -438,6 +461,10 @@ echo "  $BIN"
 echo "  $TARGET/resources/     fonts and icon"
 echo "  $TARGET/config.json    settings, including the debug flag"
 echo "  $DESKTOP_FILE"
+if [ -f "$AUTOSTART_FILE" ]; then
+    echo "  $AUTOSTART_FILE"
+    echo "  $TARGET/autostart.sh   what that entry runs"
+fi
 if [ -f "$SERVICE_FILE" ]; then
     echo "  $SERVICE_FILE    starts at login ($SERVICE_STATE)"
 else
@@ -466,7 +493,10 @@ if [ -f "$SERVICE_FILE" ]; then
     echo "To stop it starting at login:"
     echo "    systemctl --user disable --now $SERVICE_NAME"
     echo
-    echo "If it does not come up after a reboot, your desktop most likely"
-    echo "never reaches graphical-session.target. Check with:"
+    echo
+    echo "Your desktop may never reach graphical-session.target, which is what"
+    echo "the unit is wanted by. Check with:"
     echo "    systemctl --user is-active graphical-session.target"
+    echo "Inactive is normal on Cinnamon, XFCE, MATE and the tiling window"
+    echo "managers; the autostart entry above starts the unit for them."
 fi
