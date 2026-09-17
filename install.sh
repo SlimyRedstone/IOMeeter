@@ -217,6 +217,32 @@ check)
         echo "Starts at login: no unit installed"
     fi
 
+    # The two ways autostart fails, which look identical from the outside: the
+    # session never reaches the target that pulls the unit in, or it does but
+    # the user manager has no display to hand the process.
+    if have_user_systemd; then
+        if systemctl --user is-active graphical-session.target >/dev/null 2>&1; then
+            echo "graphical-session.target: active"
+        else
+            echo "graphical-session.target: NOT active -- this desktop does not"
+            echo "  reach it, so nothing wanted by it will ever start."
+        fi
+
+        if systemctl --user show-environment 2>/dev/null |
+               grep -Eq '^(DISPLAY|WAYLAND_DISPLAY)='; then
+            echo "Display in the user manager: yes"
+        else
+            echo "Display in the user manager: NO -- the unit would start with"
+            echo "  no DISPLAY and exit before opening a window. Fix for this"
+            echo "  session with:"
+            echo "    systemctl --user import-environment DISPLAY XAUTHORITY WAYLAND_DISPLAY"
+        fi
+
+        if [ -f "$SERVICE_FILE" ]; then
+            echo "Unit state: $(systemctl --user is-active "$SERVICE_NAME" 2>/dev/null),"                  "last result: $(systemctl --user show -p Result --value "$SERVICE_NAME" 2>/dev/null)"
+        fi
+    fi
+
     echo "Your groups: $(id -nG)"
     show_device_access
     exit 0
