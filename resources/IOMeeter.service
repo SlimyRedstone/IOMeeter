@@ -1,0 +1,13 @@
+[Unit]
+Description=IOMeeter hardware audio mixer
+Documentation=https://github.com/SlimyRedstone/IOMeeter
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=@BIN@
+WorkingDirectory=@DATA@
+
+[Install]
+WantedBy=graphical-session.target
