@@ -12,6 +12,18 @@ Documentation=https://github.com/SlimyRedstone/IOMeeter
 After=graphical-session.target xdg-desktop-autostart.target
 PartOf=graphical-session.target
 
+# The rate limit on Restart= below. systemd gives up after five starts in ten
+# seconds by default, which a session can easily take longer than to become
+# usable; twenty tries over five minutes is generous enough for a slow login
+# and still finite, so a machine that will never have a display does not
+# respawn forever.
+#
+# These belong to the unit, not the service, and have since systemd 229. In
+# [Service] only the older spelling StartLimitInterval is still understood,
+# which is why StartLimitIntervalSec there is an unknown key.
+StartLimitIntervalSec=300
+StartLimitBurst=20
+
 [Service]
 Type=simple
 ExecStart=@BIN@
@@ -29,13 +41,6 @@ WorkingDirectory=@DATA@
 # always or on-success would bring it straight back and make that look broken.
 Restart=on-failure
 RestartSec=5
-
-# systemd gives up after five starts in ten seconds by default, which a
-# session can easily take longer than to become usable. Twenty tries over five
-# minutes instead -- generous enough for a slow login, still finite, so a
-# machine that will never have a display does not respawn forever.
-StartLimitIntervalSec=300
-StartLimitBurst=20
 
 [Install]
 # Pulled in by the session, not by the autostart phase: not every desktop
