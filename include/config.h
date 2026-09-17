@@ -66,14 +66,43 @@ void config_remove_app(config_slider_t *slider, int index);
 /** Basename of @p path, without directories. */
 const char *config_basename(const char *path);
 
-#define CONFIG_DEBUG_DEFAULT true
+#define CONFIG_DEBUG_DEFAULT           true
+
+/* Installed enabled, because install.sh puts the autostart entry there for a
+   reason; a file written before this flag existed therefore keeps behaving the
+   way that install left it. */
+#define CONFIG_START_ON_BOOT_DEFAULT   true
+#define CONFIG_START_MINIMIZED_DEFAULT false
+
+/* What the close button has always done, so a file written before the box
+   existed keeps behaving the way it did. */
+#define CONFIG_MINIMIZE_ON_CLOSE_DEFAULT true
+
+/*
+ * The flags that sit beside the fader strip in config.json, under "options".
+ *
+ * One struct rather than an out-parameter each: every one of these has to be
+ * threaded through load, save, and the two text halves, and each new bool
+ * would otherwise have meant touching all five signatures again.
+ *
+ * They were written at the root of the document before they were a group;
+ * config_from_text() still reads them from there when a file carries no
+ * "options" object, so an older configuration loads unchanged and is rewritten
+ * in the new shape the next time it is saved.
+ */
+typedef struct {
+    bool debug;              /*!< open the traffic console */
+    bool start_on_boot;      /*!< let the autostart entry launch it at login */
+    bool start_minimized;    /*!< go straight to the tray, showing no window */
+    bool minimize_on_close;  /*!< the close button hides rather than quits */
+} config_opts_t;
 
 /**
  * Fill @p out with the built-in defaults.
  *
- * @param debug Receives the default debug flag. May be NULL.
+ * @param opts Receives the default flags. May be NULL.
  */
-void config_defaults(config_slider_t *out, int count, bool *debug);
+void config_defaults(config_slider_t *out, int count, config_opts_t *opts);
 
 /**
  * Read @p path into @p out.
@@ -81,12 +110,12 @@ void config_defaults(config_slider_t *out, int count, bool *debug);
  * Entries are placed by their "id" field. Anything absent from the file keeps
  * its default, so a partially written file still yields a usable strip.
  *
- * @param debug Receives the "debug" flag, or its default when absent. May be NULL.
- * @param keys  Receives the macro pad, or its defaults when absent. May be NULL.
+ * @param opts Receives the flags, or their defaults when absent. May be NULL.
+ * @param keys Receives the macro pad, or its defaults when absent. May be NULL.
  * @return true if the file was read and at least one slider was recognised.
  */
-bool config_load(const char *path, config_slider_t *out, int count, bool *debug,
-                 keys_t *keys);
+bool config_load(const char *path, config_slider_t *out, int count,
+                 config_opts_t *opts, keys_t *keys);
 
 /**
  * Serialise the configuration to a JSON string, in the same shape as the file.
@@ -95,7 +124,7 @@ bool config_load(const char *path, config_slider_t *out, int count, bool *debug,
  * configuration on the controller, which stores it as bytes so that it follows
  * the hardware rather than the machine it was set up on.
  *
- * @param debug  Written as "debug".
+ * @param opts   Written as the "options" object.
  * @param keys   Written as "keys", "profile" and "profiles". May be NULL.
  * @param pretty Indent the output. Set for the file, which is read by people,
  *               and clear for the copy sent to the controller, which is not:
@@ -103,8 +132,9 @@ bool config_load(const char *path, config_slider_t *out, int count, bool *debug,
  *               to be split into slices to cross the wire.
  * @return NULL if the document could not be built.
  */
-char *config_to_text(const config_slider_t *in, int count, bool debug,
-                     const keys_t *keys, bool pretty);
+char *config_to_text(const config_slider_t *in, int count,
+                     const config_opts_t *opts, const keys_t *keys,
+                     bool pretty);
 
 /**
  * Read a configuration from @p text, which need not be NUL-terminated JSON
@@ -115,7 +145,7 @@ char *config_to_text(const config_slider_t *in, int count, bool debug,
  * @return true if the text parsed and at least one slider was recognised.
  */
 bool config_from_text(const char *text, config_slider_t *out, int count,
-                      bool *debug, keys_t *keys);
+                      config_opts_t *opts, keys_t *keys);
 
 /**
  * Write @p in to @p path, creating it if necessary.
@@ -124,6 +154,6 @@ bool config_from_text(const char *text, config_slider_t *out, int count,
  *             leaves those out entirely rather than writing them empty.
  */
 bool config_save(const char *path, const config_slider_t *in, int count,
-                 bool debug, const keys_t *keys);
+                 const config_opts_t *opts, const keys_t *keys);
 
 #endif /* CONFIG_H */

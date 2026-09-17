@@ -281,7 +281,7 @@ void app_config_push(app_t *a)
 
     /* Not indented: nothing on the controller reads this, and every byte of
        it is one more byte to slice up and push across the wire. */
-    char *text = config_to_text(a->sliders, APP_FADER_COUNT, a->debug,
+    char *text = config_to_text(a->sliders, APP_FADER_COUNT, &a->opts,
                                 &a->keys, false);
     if (text == NULL) {
         app_log(a, APP_LOG_ERROR, "could not build the configuration");
@@ -322,7 +322,7 @@ static void app_devcfg_settle(app_t *a)
             break;
         }
 
-        if (config_from_text(doc, a->sliders, APP_FADER_COUNT, &a->debug,
+        if (config_from_text(doc, a->sliders, APP_FADER_COUNT, &a->opts,
                              &a->keys)) {
             app_log(a, APP_LOG_EVENT, "loaded %u bytes from the controller",
                     (unsigned)len);
@@ -351,7 +351,7 @@ static void app_devcfg_settle(app_t *a)
 
 void app_config_load(app_t *a)
 {
-    if (config_load(APP_CONFIG_PATH, a->sliders, APP_FADER_COUNT, &a->debug,
+    if (config_load(APP_CONFIG_PATH, a->sliders, APP_FADER_COUNT, &a->opts,
                     &a->keys)) {
         app_log(a, APP_LOG_EVENT, "loaded %s", APP_CONFIG_PATH);
     } else {
@@ -369,7 +369,7 @@ void app_config_save(app_t *a)
     }
     a->config_dirty = false;
 
-    if (!config_save(APP_CONFIG_PATH, a->sliders, APP_FADER_COUNT, a->debug,
+    if (!config_save(APP_CONFIG_PATH, a->sliders, APP_FADER_COUNT, &a->opts,
                      &a->keys)) {
         app_log(a, APP_LOG_ERROR, "could not write %s", APP_CONFIG_PATH);
     }
@@ -379,7 +379,7 @@ void app_config_save(app_t *a)
 
 bool app_config_save_as(app_t *a, const char *path)
 {
-    if (!config_save(path, a->sliders, APP_FADER_COUNT, a->debug, &a->keys)) {
+    if (!config_save(path, a->sliders, APP_FADER_COUNT, &a->opts, &a->keys)) {
         app_log(a, APP_LOG_ERROR, "could not write %s", path);
         return false;
     }
@@ -391,7 +391,7 @@ bool app_config_save_as(app_t *a, const char *path)
 
 bool app_config_load_from(app_t *a, const char *path)
 {
-    if (!config_load(path, a->sliders, APP_FADER_COUNT, &a->debug, &a->keys)) {
+    if (!config_load(path, a->sliders, APP_FADER_COUNT, &a->opts, &a->keys)) {
         /* config_load has already filled in the defaults, so the strip stays
            usable; only report that the file was not understood. */
         app_log(a, APP_LOG_ERROR, "could not read %s, defaults applied", path);
@@ -452,7 +452,7 @@ void app_init(app_t *a)
     a->sat = 1.0f;
     a->val = 1.0f;
     a->live_send = false;
-    a->debug = CONFIG_DEBUG_DEFAULT;
+    config_defaults(NULL, 0, &a->opts);
     a->battery = APP_BATTERY_DEFAULT;
 
     for (int i = 0; i < APP_LED_SLOT_COUNT; i++) {

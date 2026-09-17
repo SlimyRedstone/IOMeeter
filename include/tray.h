@@ -34,6 +34,17 @@ void tray_shutdown(void);
 
 bool tray_available(void);
 
+/**
+ * Whether the close button hides to the tray instead of ending the program.
+ *
+ * Handed down rather than read where the loop sees it, because on Windows the
+ * loop never sees it: WM_CLOSE is taken in tray.c's own window procedure
+ * before GLFW is given the chance to set its close flag.
+ *
+ * @param hides false makes the close button quit, as it would without a tray.
+ */
+void tray_set_close_hides(bool hides);
+
 void tray_minimize(void);
 
 void tray_restore(void);

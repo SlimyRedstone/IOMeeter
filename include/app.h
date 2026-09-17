@@ -127,7 +127,7 @@ typedef struct {
     char config_path[CONFIG_PATH_MAX];
 
     /* From the "debug" key. When false the traffic console is hidden. */
-    bool debug;
+    config_opts_t opts;
 
     /*
      * Charge the device last reported, as a percentage. The starting value is

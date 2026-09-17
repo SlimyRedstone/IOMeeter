@@ -29,6 +29,22 @@ set -u
 SERVICE=IOMeeter.service
 HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 
+# "Start on boot", from the configuration rather than from whether this file is
+# installed. The desktop runs this script at every login either way, so the
+# flag is what decides whether it goes any further -- clearing the checkbox
+# does not have to reach into ~/.config/autostart, and turning it back on does
+# not have to put anything back.
+#
+# Read with grep rather than a JSON parser: the key is written by
+# config_to_text() on one line of its own, and a shell script is not the place
+# to learn to parse JSON.
+CONFIG="$HERE/config.json"
+
+if [ -f "$CONFIG" ] &&
+   grep -Eq '"start_on_boot"[[:space:]]*:[[:space:]]*false' "$CONFIG"; then
+    exit 0
+fi
+
 if command -v systemctl >/dev/null 2>&1 &&
    systemctl --user show-environment >/dev/null 2>&1; then
 

@@ -27,7 +27,7 @@ int main(int argc, char **argv)
     app_init(&app);
 
     /* app_init has read config.json by now, so "debug" is known. */
-    console_init(app.debug);
+    console_init(app.opts.debug);
 
     app_connect(&app);
 

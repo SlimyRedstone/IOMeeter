@@ -25,6 +25,10 @@ static bool s_ready;
 static bool s_minimized;
 static bool s_quit_requested;
 
+/* What the close button does. Read by app_window_proc() below, which is the
+   only place WM_CLOSE is ever seen. */
+static bool s_close_hides = true;
+
 /* GLFW's own window procedure, chained to for everything we do not handle. */
 static WNDPROC s_original_proc;
 
@@ -127,7 +131,7 @@ static void disable_ghosting(void)
 static LRESULT CALLBACK app_window_proc(HWND hwnd, UINT msg, WPARAM wparam,
                                         LPARAM lparam)
 {
-    if (msg == WM_CLOSE && s_ready) {
+    if (msg == WM_CLOSE && s_ready && s_close_hides) {
         tray_minimize();
         return 0;
     }
@@ -218,6 +222,11 @@ void tray_shutdown(void)
 bool tray_available(void)
 {
     return s_ready;
+}
+
+void tray_set_close_hides(bool hides)
+{
+    s_close_hides = hides;
 }
 
 void tray_minimize(void)
@@ -419,6 +428,14 @@ bool tray_available(void)
     return s_ready;
 }
 
+/* Nothing to remember here: X11 lets the close button through to the main
+   loop as GLFW's should-close flag, so the choice is made where that is read
+   rather than in a window procedure of our own. */
+void tray_set_close_hides(bool hides)
+{
+    (void)hides;
+}
+
 void tray_minimize(void)
 {
     if (!s_ready || s_hidden) {
@@ -496,6 +513,7 @@ bool tray_init(void *window_handle, const char *icon_path, const char *tooltip)
 void tray_shutdown(void)      {}
 void tray_notify(const char *title, const char *text) { (void)title; (void)text; }
 bool tray_available(void)     { return false; }
+void tray_set_close_hides(bool hides) { (void)hides; }
 void tray_minimize(void)      {}
 void tray_restore(void)       {}
 bool tray_is_minimized(void)  { return false; }

@@ -71,12 +71,26 @@ void config_remove_app(config_slider_t *slider, int index)
     slider->app_count--;
 }
 
-void config_defaults(config_slider_t *out, int count, bool *debug)
+/* One boolean out of the document, left alone when the key is absent or is
+   not a boolean at all. */
+static void read_flag(const cJSON *root, const char *name, bool *out)
+{
+    const cJSON *flag = cJSON_GetObjectItemCaseSensitive(root, name);
+
+    if (cJSON_IsBool(flag)) {
+        *out = cJSON_IsTrue(flag) ? true : false;
+    }
+}
+
+void config_defaults(config_slider_t *out, int count, config_opts_t *opts)
 {
     int known = (int)(sizeof(DEFAULTS) / sizeof(DEFAULTS[0]));
 
-    if (debug) {
-        *debug = CONFIG_DEBUG_DEFAULT;
+    if (opts) {
+        opts->debug             = CONFIG_DEBUG_DEFAULT;
+        opts->start_on_boot     = CONFIG_START_ON_BOOT_DEFAULT;
+        opts->start_minimized   = CONFIG_START_MINIMIZED_DEFAULT;
+        opts->minimize_on_close = CONFIG_MINIMIZE_ON_CLOSE_DEFAULT;
     }
 
     for (int i = 0; i < count; i++) {
@@ -179,10 +193,10 @@ static void load_apps(const cJSON *slider, config_slider_t *out)
     }
 }
 
-bool config_load(const char *path, config_slider_t *out, int count, bool *debug,
-                 keys_t *keys)
+bool config_load(const char *path, config_slider_t *out, int count,
+                 config_opts_t *opts, keys_t *keys)
 {
-    config_defaults(out, count, debug);
+    config_defaults(out, count, opts);
     if (keys) {
         keys_defaults(keys);
     }
@@ -192,15 +206,15 @@ bool config_load(const char *path, config_slider_t *out, int count, bool *debug,
         return false;
     }
 
-    bool ok = config_from_text(text, out, count, debug, keys);
+    bool ok = config_from_text(text, out, count, opts, keys);
     free(text);
     return ok;
 }
 
 bool config_from_text(const char *text, config_slider_t *out, int count,
-                      bool *debug, keys_t *keys)
+                      config_opts_t *opts, keys_t *keys)
 {
-    config_defaults(out, count, debug);
+    config_defaults(out, count, opts);
     if (keys) {
         keys_defaults(keys);
     }
@@ -220,11 +234,20 @@ bool config_from_text(const char *text, config_slider_t *out, int count,
         keys_from_json(root, keys);
     }
 
-    if (debug) {
-        const cJSON *flag = cJSON_GetObjectItemCaseSensitive(root, "debug");
-        if (cJSON_IsBool(flag)) {
-            *debug = cJSON_IsTrue(flag) ? true : false;
-        }
+    if (opts) {
+        /* Grouped under "options" now. A file written before that had them
+           loose at the root, so the root is what gets read when there is no
+           object to read instead -- and saving puts them back in the new
+           place, so the old shape converts on first write. */
+        const cJSON *group = cJSON_GetObjectItemCaseSensitive(root, "options");
+        const cJSON *from = cJSON_IsObject(group) ? group : root;
+
+        /* Anything absent keeps the default config_defaults() just wrote, so a
+           file from before these existed reads as the behaviour it had. */
+        read_flag(from, "debug", &opts->debug);
+        read_flag(from, "start_on_boot", &opts->start_on_boot);
+        read_flag(from, "start_minimized", &opts->start_minimized);
+        read_flag(from, "minimize_on_close", &opts->minimize_on_close);
     }
 
     const cJSON *sliders = cJSON_GetObjectItemCaseSensitive(root, "sliders");
@@ -279,15 +302,32 @@ bool config_from_text(const char *text, config_slider_t *out, int count,
     return found > 0;
 }
 
-char *config_to_text(const config_slider_t *in, int count, bool debug,
-                     const keys_t *keys, bool pretty)
+char *config_to_text(const config_slider_t *in, int count,
+                     const config_opts_t *opts, const keys_t *keys, bool pretty)
 {
     cJSON *root = cJSON_CreateObject();
     if (root == NULL) {
         return false;
     }
 
-    bool built = (cJSON_AddBoolToObject(root, "debug", debug) != NULL);
+    /* Callers all have one, but the contract says the pad may be NULL and this
+       reads better as the same kind of thing. */
+    config_opts_t fallback;
+    if (opts == NULL) {
+        config_defaults(NULL, 0, &fallback);
+        opts = &fallback;
+    }
+
+    cJSON *options = cJSON_AddObjectToObject(root, "options");
+
+    bool built = options != NULL &&
+        (cJSON_AddBoolToObject(options, "debug", opts->debug) != NULL) &&
+        (cJSON_AddBoolToObject(options, "start_on_boot",
+                               opts->start_on_boot) != NULL) &&
+        (cJSON_AddBoolToObject(options, "start_minimized",
+                               opts->start_minimized) != NULL) &&
+        (cJSON_AddBoolToObject(options, "minimize_on_close",
+                               opts->minimize_on_close) != NULL);
     cJSON *sliders = cJSON_AddArrayToObject(root, "sliders");
     built = built && (sliders != NULL);
 
@@ -332,10 +372,10 @@ char *config_to_text(const config_slider_t *in, int count, bool debug,
 }
 
 bool config_save(const char *path, const config_slider_t *in, int count,
-                 bool debug, const keys_t *keys)
+                 const config_opts_t *opts, const keys_t *keys)
 {
     /* The file is for reading, so it is always indented. */
-    char *text = config_to_text(in, count, debug, keys, true);
+    char *text = config_to_text(in, count, opts, keys, true);
 
     if (text == NULL) {
         fprintf(stderr, "could not build %s\n", path);

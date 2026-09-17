@@ -393,9 +393,22 @@ static Clay_Color mix(Clay_Color base, Clay_Color hi, bool on)
  * Clay reports hover for the element being declared, so a click is "hovered
  * while the mouse was released this frame".
  */
+/*
+ * Set when a press was taken by something that hit-tests raw coordinates
+ * rather than going through Clay -- the menu is the only one.
+ *
+ * The menu acts on the press and closes itself there and then; Clay's buttons
+ * act on the release. So by the time the button comes up the menu is gone, the
+ * pointer is over whatever was behind it, and that took the click as well.
+ * Swallowing the release is what stops the second half of one click landing
+ * somewhere the first half never was.
+ */
+static bool s_swallow_release;
+
 static bool clicked(bool enabled)
 {
-    return enabled && Clay_Hovered() && IsMouseButtonReleased(MOUSE_BUTTON_LEFT);
+    return enabled && !s_swallow_release && Clay_Hovered() &&
+           IsMouseButtonReleased(MOUSE_BUTTON_LEFT);
 }
 
 /* On press rather than release, matching the fader rename. */
@@ -929,6 +942,21 @@ static void ui_card_title(const char *title)
 /* As UI_CARD, but filling the width. Only the traffic console uses it: its
    content is arbitrarily wide, so fitting to it would have the panel resize
    itself on every line that arrives. */
+/* UI_CARD without the centring, for a card whose contents are a list rather
+   than a display: a column of settings belongs against the left edge, and with
+   the card fitting its content the centring only offsets the shorter rows. */
+#define UI_CARD_LEFT(id, minw) CLAY(id, {                                    \
+        .layout = {                                                          \
+            .sizing = { CLAY_SIZING_FIT(minw), CLAY_SIZING_FIT(0) },         \
+            .padding = CLAY_PADDING_ALL(14),                                 \
+            .childGap = 8,                                                   \
+            .layoutDirection = CLAY_TOP_TO_BOTTOM,                           \
+        },                                                                   \
+        .backgroundColor = C_CARD,                                           \
+        .cornerRadius = CLAY_CORNER_RADIUS(12),                              \
+        .border = { .color = C_BORDER, .width = { 1, 1, 1, 1 } },            \
+    })
+
 #define UI_CARD_WIDE(id) CLAY(id, {                                         \
         .layout = {                                                          \
             .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIT(0) },           \
@@ -2348,6 +2376,51 @@ static void ui_profiles_card(app_t *app)
 }
 
 /*
+ * When IOMeeter comes up, rather than what it does once it has.
+ *
+ * Both flags are written to config.json beside the fader strip, and neither is
+ * acted on here. "Start on boot" is read by autostart.sh, which the desktop
+ * runs at every login whatever the setting says: the flag decides whether that
+ * script goes on to start anything, so clearing the box needs no file added to
+ * or taken out of ~/.config/autostart. "Start minimized" is read by ui_run()
+ * on the way in.
+ */
+static void ui_startup_card(app_t *app)
+{
+    /* Fits its content in height but never narrower than the profiles card
+       below it: two cards in a column at different widths read as a mistake,
+       and the boxes are shorter than any of the rows over there. */
+    UI_CARD_LEFT(CLAY_ID("StartupCard"), PROFILES_MIN_W) {
+        ui_card_title("OPTIONS");
+
+        if (ui_checkbox(CLAY_ID("StartOnBoot"), "Start on boot",
+                        &app->opts.start_on_boot)) {
+            app->config_dirty = true;
+        }
+
+        if (ui_checkbox(CLAY_ID("StartMinimized"), "Start minimized",
+                        &app->opts.start_minimized)) {
+            app->config_dirty = true;
+        }
+
+        /* The window's own close button, which tray.c is told about every
+           frame in ui_run(): on Windows it never reaches this loop. */
+        if (ui_checkbox(CLAY_ID("MinimizeOnClose"), "Minimize on close",
+                        &app->opts.minimize_on_close)) {
+            app->config_dirty = true;
+        }
+
+        /* Takes effect at once for the traffic console in the window; the
+           separate console window console.c opens is decided at startup and
+           does not appear until the next one. */
+        if (ui_checkbox(CLAY_ID("DebugFlag"), "Debug",
+                        &app->opts.debug)) {
+            app->config_dirty = true;
+        }
+    }
+}
+
+/*
  * Switches profile when the window in front is one a profile claims. Nothing
  * happens when no profile claims it, so a manual choice survives clicking on
  * a program nobody listed -- including this one, which is in front whenever
@@ -2851,10 +2924,17 @@ static void ui_tab_bar(void)
 #define MENU_WIDTH    230.0f
 #define MENU_ITEM_H   40.0f
 #define MENU_PAD      6.0f
-#define MENU_ITEMS    3
+#define MENU_ITEMS    5
 
+/*
+ * Order is the order they are dispatched in below, so the two must be changed
+ * together. The plain pair first: they are what gets used, and the file
+ * chooser is the exception rather than the default.
+ */
 static const char *const s_menu_items[MENU_ITEMS] = {
-    "Save config", "Load config", "Reload config",
+    "Save config", "Load config",
+    "Save config to", "Load config from",
+    "Reload config",
 };
 
 static Rectangle ui_menu_rect(Clay_BoundingBox button)
@@ -2946,6 +3026,8 @@ static void ui_add_app(app_t *app, int slider)
     app_apply_volume(app, slider);
 }
 
+/* "Save config to": somewhere the user picks. The plain "Save config" beside
+   it in the menu goes straight to app_config_save() and opens nothing. */
 static void ui_menu_save_config(app_t *app)
 {
     char path[512];
@@ -2967,6 +3049,9 @@ static void ui_menu_reload_config(app_t *app)
     app_config_reload(app);
 }
 
+/* "Load config from", the mirror of the above. Note what it does not do:
+   app_config_load_from() records the path, so "Reload config" afterwards
+   re-reads that file rather than the one in the working directory. */
 static void ui_menu_load_config(app_t *app)
 {
     char path[512];
@@ -3359,7 +3444,7 @@ static void ui_log_copy(const app_t *app)
  */
 static void ui_log_interact(const app_t *app)
 {
-    if (!app->debug) {
+    if (!app->opts.debug) {
         return;
     }
 
@@ -3461,7 +3546,7 @@ static void ui_log_interact(const app_t *app)
  */
 static void ui_draw_fps(const app_t *app)
 {
-    if (!app->debug) {
+    if (!app->opts.debug) {
         return;
     }
 
@@ -3492,7 +3577,7 @@ static void ui_draw_fps(const app_t *app)
 /* Drawn after Clay, so the bar sits over the text rather than under it. */
 static void ui_log_draw_scrollbar(const app_t *app)
 {
-    if (!app->debug) {
+    if (!app->opts.debug) {
         return;
     }
 
@@ -3666,9 +3751,21 @@ int ui_run(app_t *app)
     setenv("RESOURCE_NAME", "IOMeeter", 1);
 #endif
 
-    Clay_Raylib_Initialize(window_w, window_h,
-                           "IOMeeter",
-                           FLAG_VSYNC_HINT | FLAG_WINDOW_RESIZABLE | FLAG_MSAA_4X_HINT);
+    /*
+     * Hidden from the start when the configuration asks for it, rather than
+     * shown and then taken away. InitWindow() maps the window, so anything
+     * that hides it afterwards has already been on screen -- on Windows for
+     * the whole of the icon load and tray registration, which is a visible
+     * flash of an empty window.
+     */
+    unsigned int window_flags = FLAG_VSYNC_HINT | FLAG_WINDOW_RESIZABLE |
+                                FLAG_MSAA_4X_HINT;
+
+    if (app->opts.start_minimized) {
+        window_flags |= FLAG_WINDOW_HIDDEN;
+    }
+
+    Clay_Raylib_Initialize(window_w, window_h, "IOMeeter", window_flags);
 
     /* The layout stops being readable below its design size, so make that the
        floor rather than letting the cards collapse. */
@@ -3729,6 +3826,25 @@ int ui_run(app_t *app)
     }
     tray_init(GetWindowHandle(), tray_icon, "IOMeeter");
 
+    /*
+     * "Start minimized", the other half of it: the window was never mapped,
+     * and this is what makes the tray agree. tray_minimize() sets the flag the
+     * main loop reads to decide whether to draw at all, and hides the window
+     * again, which costs nothing when it is already hidden.
+     *
+     * Without a tray there is nowhere to minimise to, so the window is shown
+     * instead. A hidden window and no icon is a process with no way back to
+     * it, and on Linux the tray is a stub whenever libayatana-appindicator was
+     * missing at build time.
+     */
+    if (app->opts.start_minimized) {
+        if (tray_available()) {
+            tray_minimize();
+        } else {
+            ClearWindowState(FLAG_WINDOW_HIDDEN);
+        }
+    }
+
     char font_path[512];
 
     if (respath_find("Roboto-Regular.ttf", font_path, sizeof(font_path))) {
@@ -3785,11 +3901,16 @@ int ui_run(app_t *app)
         watchdog_phase("WindowShouldClose");
 
         if (WindowShouldClose()) {
-            if (!tray_available()) {
+            if (!tray_available() || !app->opts.minimize_on_close) {
                 break;
             }
             tray_minimize();
         }
+
+        /* One store, every frame, rather than on every path that could have
+           changed it: the checkbox, a reload from the file and a document off
+           the controller all reach the same flag. */
+        tray_set_close_hides(app->opts.minimize_on_close);
 
         watchdog_phase("tray_poll");
         if (tray_poll()) {      /* "Close IOMeeter" from the tray menu */
@@ -3894,6 +4015,14 @@ int ui_run(app_t *app)
          * without knowing what is drawn above them, so without this a click on
          * a menu entry also dragged whatever sat underneath it.
          */
+        /* Cleared on the first frame the button is neither down nor coming
+           up, so the release it was set for is the one it suppresses and the
+           next click is unaffected. */
+        if (!IsMouseButtonDown(MOUSE_BUTTON_LEFT) &&
+            !IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) {
+            s_swallow_release = false;
+        }
+
         Rectangle menu_panel = { 0 };
         bool menu_blocks = false;
 
@@ -3910,13 +4039,28 @@ int ui_run(app_t *app)
 
                 if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
                     int item = ui_menu_hit(menu_panel);
+
+                    /* Whether it picked something or dismissed the menu, this
+                       press belongs to the menu and its release belongs to
+                       nobody. Not when the pointer is on the button itself:
+                       that release is what Clay toggles the menu with. */
+                    if (item >= 0 || !over_button) {
+                        s_swallow_release = true;
+                    }
+
                     if (item == 0) {
                         s_menu_open = false;
-                        ui_menu_save_config(app);
+                        app_config_save(app);
                     } else if (item == 1) {
                         s_menu_open = false;
-                        ui_menu_load_config(app);
+                        app_config_load(app);
                     } else if (item == 2) {
+                        s_menu_open = false;
+                        ui_menu_save_config(app);
+                    } else if (item == 3) {
+                        s_menu_open = false;
+                        ui_menu_load_config(app);
+                    } else if (item == 4) {
                         s_menu_open = false;
                         ui_menu_reload_config(app);
                     } else if (!over_button) {
@@ -3959,7 +4103,7 @@ int ui_run(app_t *app)
             }
         }
 
-        float fader_h = (float)ui_fader_height(app->debug);
+        float fader_h = (float)ui_fader_height(app->opts.debug);
 
         /*
          * Clay stops the pointer at a floating element on its own, but the
@@ -4208,19 +4352,34 @@ int ui_run(app_t *app)
             CLAY(CLAY_ID("ConfigTab"), {
                 .layout = {
                     .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIT(0) },
-                    .childGap = 12,
+                    .childGap = 6,
                     .layoutDirection = CLAY_TOP_TO_BOTTOM,
-                    .childAlignment = { .x = CLAY_ALIGN_X_CENTER },
+                    /* Left, not centred: two rows of different widths centred
+                       against each other read as two separate things rather
+                       than as a grid, and the left edge is the one they have
+                       in common. */
                 },
             }) {
-                /* Side by side: stacked, the slots push the profiles card off
-                   the bottom of the window. */
+                /* Reading order across the grid: options, profiles, then
+                   the two LED cards. Side by side rather than stacked, which
+                   pushed everything below the slots off the window. */
+                CLAY(CLAY_ID("ConfigRow1"), {
+                    .layout = {
+                        .sizing = { CLAY_SIZING_FIT(0), CLAY_SIZING_FIT(0) },
+                        .childGap = 12,
+                    },
+                }) {
+                    ui_startup_card(app);
+                    ui_profiles_card(app);
+                }
+
                 CLAY(CLAY_ID("LedCards"), {
                     .layout = {
                         .sizing = { CLAY_SIZING_FIT(0), CLAY_SIZING_FIT(0) },
                         .childGap = 12,
                     },
                 }) {
+                ui_led_states_card(app);
                 UI_CARD(CLAY_ID("LedCard")) {
                     ui_card_title("NEOPIXEL");
 
@@ -4291,10 +4450,7 @@ int ui_run(app_t *app)
                     }
                 }
 
-                ui_led_states_card(app);
                 }   /* LedCards */
-
-                ui_profiles_card(app);
             }
             }   /* if (s_tab == TAB_CONFIG) */
 
@@ -4423,7 +4579,7 @@ int ui_run(app_t *app)
             /* ---- traffic ----
                Declared only when "debug" is set in config.json; leaving it out
                of the layout hands its height back to the cards above. */
-            if (app->debug) {
+            if (app->opts.debug) {
             /*
              * Takes what the cards above have left instead of adding to the
              * height they need. Sizing the window is the user's business, and
@@ -4506,7 +4662,7 @@ int ui_run(app_t *app)
                     }
                 }
             }
-            }   /* if (app->debug) */
+            }   /* if (app->opts.debug) */
 
             /* Declared last and floating, so they lay out over everything
                above rather than pushing the cards around. Only one of the two
@@ -4578,7 +4734,7 @@ int ui_run(app_t *app)
 
         /* Both need this frame's content height, so they run after the
            layout and before anything is drawn. */
-        if (app->debug) {
+        if (app->opts.debug) {
             ui_autoscroll_log(app, CLAY_ID("LogScroll"));
         }
         ui_autoscroll_steps(app);
