@@ -3,12 +3,18 @@
 # Installs IOMeeter for the current user.
 #
 #   ./install.sh              prerequisites, build, install
+#   ./install.sh --no-service install without starting it at login
 #   sudo ./install.sh --udev  install the USB permission rule
 #   ./install.sh --uninstall  remove the installed copy
 #   ./install.sh --check      report whether the USB rule is working
 #
 # Everything lands in ~/.IOMeeter, with a launcher in the application menu so
 # it appears in the panel with its own icon. Nothing needs root except --udev.
+#
+# A systemd *user* unit is enabled as well, so IOMeeter comes up with the
+# desktop session. It is a user unit rather than a system one for the same
+# reason this script refuses to run under sudo: the mixer needs the session's
+# sound server. --no-service installs everything else and leaves it alone.
 #
 # Do NOT run the install with sudo: $HOME becomes /root and it would all go to
 # the wrong account. IOMeeter must also run as your own user, because the audio
@@ -22,6 +28,12 @@ TARGET="$HOME/.IOMeeter"
 BIN="$TARGET/IOMeeter"
 DESKTOP_DIR="$HOME/.local/share/applications"
 DESKTOP_FILE="$DESKTOP_DIR/IOMeeter.desktop"
+
+# Per-user units live here; nothing under /etc/systemd is touched.
+SYSTEMD_DIR="$HOME/.config/systemd/user"
+SERVICE_NAME="IOMeeter.service"
+SERVICE_FILE="$SYSTEMD_DIR/$SERVICE_NAME"
+WANT_SERVICE=1
 THEME_DIR="$HOME/.local/share/icons/hicolor"
 ICON_DIR="$THEME_DIR/128x128/apps"
 
@@ -45,9 +57,10 @@ APT_OPTIONAL="libayatana-appindicator3-dev libraylib-dev libxtst-dev libx11-dev"
 MODE=install
 
 usage() {
-    echo "Usage: ./install.sh [--udev|--uninstall|--check]"
+    echo "Usage: ./install.sh [--no-service|--udev|--uninstall|--check]"
     echo
     echo "  (none)       install prerequisites, build, then install to ~/.IOMeeter"
+    echo "  --no-service install without starting IOMeeter at login"
     echo "  --udev       install the USB permission rule (needs root)"
     echo "  --uninstall  remove the installed copy, keeping config.json"
     echo "  --check      report whether the USB rule is working"
@@ -55,6 +68,7 @@ usage() {
 
 for arg in "$@"; do
     case "$arg" in
+        --no-service) WANT_SERVICE=0 ;;
         --udev)      MODE=udev ;;
         --uninstall) MODE=uninstall ;;
         --check)     MODE=check ;;
@@ -120,6 +134,17 @@ refresh_caches() {
     return 0
 }
 
+# Whether there is a systemd user manager to talk to at all.
+#
+# systemctl being on PATH is not enough: a container, an SSH session with no
+# lingering enabled, or a distribution that does not use systemd all leave the
+# per-user manager absent, and every --user call then fails. Checked once so
+# the install can carry on without it rather than reporting a wall of errors.
+have_user_systemd() {
+    command -v systemctl >/dev/null 2>&1 &&
+        systemctl --user show-environment >/dev/null 2>&1
+}
+
 # Written line by line rather than from a file, so the rule cannot go missing
 # from a checkout and drift out of step with this script.
 write_udev_rule() {
@@ -181,12 +206,33 @@ check)
     else
         echo "Installed binary: $BIN (MISSING)"
     fi
+    if [ -f "$SERVICE_FILE" ]; then
+        if have_user_systemd &&
+           systemctl --user is-enabled "$SERVICE_NAME" >/dev/null 2>&1; then
+            echo "Starts at login: yes ($SERVICE_FILE)"
+        else
+            echo "Starts at login: no, unit present but not enabled"
+        fi
+    else
+        echo "Starts at login: no unit installed"
+    fi
+
     echo "Your groups: $(id -nG)"
     show_device_access
     exit 0
     ;;
 
 uninstall)
+    # Stopped and disabled before the unit file goes, or systemd keeps a job
+    # queued for a file that is no longer there.
+    if have_user_systemd && [ -f "$SERVICE_FILE" ]; then
+        systemctl --user disable --now "$SERVICE_NAME" >/dev/null 2>&1
+    fi
+    rm -f "$SERVICE_FILE"
+    if have_user_systemd; then
+        systemctl --user daemon-reload >/dev/null 2>&1
+    fi
+
     rm -f "$BIN" "$DESKTOP_FILE" "$ICON_DIR/iomeeter.png"
     rm -rf "$TARGET/resources"
     refresh_caches
@@ -319,6 +365,39 @@ sed -e "s|@BIN@|$BIN|" -e "s|@DATA@|$TARGET|" \
     resources/IOMeeter.desktop > "$DESKTOP_FILE" || exit 1
 chmod 644 "$DESKTOP_FILE"
 
+# The same two substitutions as the launcher: a unit file expands neither
+# $HOME nor a relative path in ExecStart.
+if [ "$WANT_SERVICE" -eq 1 ]; then
+    if have_user_systemd; then
+        mkdir -p "$SYSTEMD_DIR" || exit 1
+        sed -e "s|@BIN@|$BIN|" -e "s|@DATA@|$TARGET|" \
+            resources/IOMeeter.service > "$SERVICE_FILE" || exit 1
+        chmod 644 "$SERVICE_FILE"
+
+        systemctl --user daemon-reload
+
+        # enable, not enable --now: starting it here would put a second copy
+        # beside whatever is already running, and instance.c would only make
+        # the new one hand over and quit.
+        if systemctl --user enable "$SERVICE_NAME" >/dev/null 2>&1; then
+            SERVICE_STATE="enabled"
+        else
+            SERVICE_STATE="installed but could not be enabled"
+        fi
+
+        # The unit inherits the user manager's environment, not the session's.
+        # Desktops that start their session under systemd import DISPLAY and
+        # the rest themselves; the others have to be told, and this only
+        # covers the session running now.
+        systemctl --user import-environment \
+            DISPLAY XAUTHORITY WAYLAND_DISPLAY XDG_SESSION_TYPE 2>/dev/null
+    else
+        SERVICE_STATE="skipped: no systemd user manager on this session"
+    fi
+else
+    SERVICE_STATE="skipped: --no-service"
+fi
+
 # An ELF binary carries no icon of its own, so the file manager is told which
 # one to use through GVFS metadata.
 if command -v gio >/dev/null 2>&1; then
@@ -333,6 +412,11 @@ echo "  $BIN"
 echo "  $TARGET/resources/     fonts and icon"
 echo "  $TARGET/config.json    settings, including the debug flag"
 echo "  $DESKTOP_FILE"
+if [ -f "$SERVICE_FILE" ]; then
+    echo "  $SERVICE_FILE    starts at login ($SERVICE_STATE)"
+else
+    echo "  starts at login: $SERVICE_STATE"
+fi
 
 if command -v desktop-file-validate >/dev/null 2>&1; then
     desktop-file-validate "$DESKTOP_FILE" && echo "Launcher validates."
@@ -347,3 +431,16 @@ fi
 
 echo
 echo "IOMeeter should now be in the menu under Sound & Video."
+
+if [ -f "$SERVICE_FILE" ]; then
+    echo
+    echo "It will also start with your desktop session. To check on it:"
+    echo "    systemctl --user status $SERVICE_NAME"
+    echo "    journalctl --user -u $SERVICE_NAME -b"
+    echo "To stop it starting at login:"
+    echo "    systemctl --user disable --now $SERVICE_NAME"
+    echo
+    echo "If it does not come up after a reboot, your desktop most likely"
+    echo "never reaches graphical-session.target. Check with:"
+    echo "    systemctl --user is-active graphical-session.target"
+fi
