@@ -71,6 +71,26 @@ void config_remove_app(config_slider_t *slider, int index)
     slider->app_count--;
 }
 
+/* One number out of the document, left alone when the key is absent or is
+   not a number at all. The range is the caller's business. */
+static void read_number(const cJSON *root, const char *name, int *out)
+{
+    const cJSON *value = cJSON_GetObjectItemCaseSensitive(root, name);
+
+    if (cJSON_IsNumber(value)) {
+        *out = value->valueint;
+    }
+}
+
+/* One string out of the document, handed to the caller to make sense of. */
+static const char *read_name(const cJSON *root, const char *name)
+{
+    const cJSON *value = cJSON_GetObjectItemCaseSensitive(root, name);
+
+    return (cJSON_IsString(value) && value->valuestring) ? value->valuestring
+                                                         : NULL;
+}
+
 /* One boolean out of the document, left alone when the key is absent or is
    not a boolean at all. */
 static void read_flag(const cJSON *root, const char *name, bool *out)
@@ -91,6 +111,9 @@ void config_defaults(config_slider_t *out, int count, config_opts_t *opts)
         opts->start_on_boot     = CONFIG_START_ON_BOOT_DEFAULT;
         opts->start_minimized   = CONFIG_START_MINIMIZED_DEFAULT;
         opts->minimize_on_close = CONFIG_MINIMIZE_ON_CLOSE_DEFAULT;
+        opts->overlay           = CONFIG_OVERLAY_DEFAULT;
+        opts->overlay_position  = CONFIG_OVERLAY_POSITION_DEFAULT;
+        opts->overlay_ms        = OSD_MS_DEFAULT;
     }
 
     for (int i = 0; i < count; i++) {
@@ -248,6 +271,17 @@ bool config_from_text(const char *text, config_slider_t *out, int count,
         read_flag(from, "start_on_boot", &opts->start_on_boot);
         read_flag(from, "start_minimized", &opts->start_minimized);
         read_flag(from, "minimize_on_close", &opts->minimize_on_close);
+        read_flag(from, "overlay", &opts->overlay);
+
+        /* The corner by name rather than by number, so the file says what it
+           means and reordering the enumeration cannot silently move it. */
+        const char *corner = read_name(from, "overlay_position");
+        if (corner != NULL) {
+            opts->overlay_position = osd_position_parse(corner);
+        }
+
+        read_number(from, "overlay_ms", &opts->overlay_ms);
+        opts->overlay_ms = osd_clamp_ms(opts->overlay_ms);
     }
 
     const cJSON *sliders = cJSON_GetObjectItemCaseSensitive(root, "sliders");
@@ -327,7 +361,13 @@ char *config_to_text(const config_slider_t *in, int count,
         (cJSON_AddBoolToObject(options, "start_minimized",
                                opts->start_minimized) != NULL) &&
         (cJSON_AddBoolToObject(options, "minimize_on_close",
-                               opts->minimize_on_close) != NULL);
+                               opts->minimize_on_close) != NULL) &&
+        (cJSON_AddBoolToObject(options, "overlay", opts->overlay) != NULL) &&
+        (cJSON_AddStringToObject(options, "overlay_position",
+                                 osd_position_id(opts->overlay_position))
+             != NULL) &&
+        (cJSON_AddNumberToObject(options, "overlay_ms",
+                                 opts->overlay_ms) != NULL);
     cJSON *sliders = cJSON_AddArrayToObject(root, "sliders");
     built = built && (sliders != NULL);
 

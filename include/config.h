@@ -30,6 +30,9 @@
 
 #include "keys.h"
 
+/* For osd_position_t: the overlay's corner is stored with the other flags. */
+#include "osd.h"
+
 #define CONFIG_NAME_MAX 32
 #define CONFIG_PATH_MAX 260
 #define CONFIG_APPS_MAX 16
@@ -78,6 +81,11 @@ const char *config_basename(const char *path);
    existed keeps behaving the way it did. */
 #define CONFIG_MINIMIZE_ON_CLOSE_DEFAULT true
 
+/* On, because the overlay is the only thing that says anything at all while
+   the interface is in the tray, which is where it spends its time. */
+#define CONFIG_OVERLAY_DEFAULT          true
+#define CONFIG_OVERLAY_POSITION_DEFAULT OSD_TOP_RIGHT
+
 /*
  * The flags that sit beside the fader strip in config.json, under "options".
  *
@@ -95,6 +103,13 @@ typedef struct {
     bool start_on_boot;      /*!< let the autostart entry launch it at login */
     bool start_minimized;    /*!< go straight to the tray, showing no window */
     bool minimize_on_close;  /*!< the close button hides rather than quits */
+
+    /* The on-screen display. The corner and the time it stays up are the only
+       two things about it worth choosing, so they live here rather than in a
+       section of their own. */
+    bool           overlay;
+    osd_position_t overlay_position;
+    int            overlay_ms;
 } config_opts_t;
 
 /**

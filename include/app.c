@@ -12,6 +12,7 @@
 #include "foreground.h"
 #include "keysend.h"
 #include "media.h"
+#include "osd.h"
 #include "volume.h"
 #include "proto.h"
 #include "usbdev.h"
@@ -782,6 +783,12 @@ static void app_handle_packet(app_t *a, const unsigned char *data, int len,
             a->sliders[id->valueint].value = level;
             a->slider_extern_seq++;
             a->slider_extern_at[id->valueint]++;
+
+            /* Only the fader on the surface puts this up, not one dragged in
+               the window: the overlay exists for the times there is no window
+               to look at, and a drag would otherwise hold it on screen for as
+               long as the pointer was down. */
+            osd_show_level(a->sliders[id->valueint].name, level, APP_FADER_MAX);
             /* Coalesced: a physical fader sends far faster than the frame rate,
                and each push reaches the audio session graph. */
             a->slider_volume_dirty[id->valueint] = true;
@@ -1055,6 +1062,30 @@ void app_apply_volume(app_t *a, int id)
     a->slider_unmatched[id] = unmatched;
 }
 
+/*
+ * What the overlay says about a key, which is not what the log says about it.
+ *
+ * The log is read afterwards and can afford to be exact; this is read at a
+ * glance while something else owns the screen, so it is the key's own name
+ * where it has one, and the shortest honest account of what it did under that.
+ */
+static void app_osd_key(int id, const keys_binding_t *binding)
+{
+    char title[OSD_TEXT_MAX];
+
+    /* The name alone. What the key is bound to was under it for a while, but
+       the person reading it is the person who bound it and who just pressed
+       it, so the chord spelled out underneath said nothing they did not
+       already know. */
+    if (binding->name[0] != 0) {
+        snprintf(title, sizeof(title), "%s", binding->name);
+    } else {
+        snprintf(title, sizeof(title), "Key %d", id + 1);
+    }
+
+    osd_show_text(title);
+}
+
 bool app_key_press(app_t *a, int id)
 {
     const keys_binding_t *binding = keys_binding_const(&a->keys, id, a->keys.profile);
@@ -1077,6 +1108,7 @@ bool app_key_press(app_t *a, int id)
             return false;
         }
         a->key_press_at[id]++;
+        app_osd_key(id, binding);
         app_log(a, APP_LOG_EVENT, "key %d: %s %s", id,
                 media_action_label(binding->macro.media_action),
                 binding->macro.media);
@@ -1116,6 +1148,7 @@ bool app_key_press(app_t *a, int id)
     }
 
     a->key_press_at[id]++;
+    app_osd_key(id, binding);
 
     const char *what = binding->name[0] ? binding->name
                      : (binding->macro.count > 0 ? binding->macro.cmds[0]

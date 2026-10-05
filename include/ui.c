@@ -12,6 +12,7 @@
 #include "instance.h"
 #include "keysend.h"
 #include "media.h"
+#include "osd.h"
 #include "watchdog.h"
 #include "respath.h"
 #include "tray.h"
@@ -170,6 +171,12 @@ static bool s_key_record;
 
 /* The colour is edited as text so it can be half-typed; the binding only takes
    it once six digits are there. */
+/* The overlay's duration as typed. Held as text so a half-entered number is
+   not clamped to the minimum under the caret; the value behind it follows on
+   every frame, the way a macro's timing does. */
+static char s_overlay_ms[8];
+static int  s_overlay_ms_seen = -1;
+
 static char s_key_hex[8];
 
 /* What the wheel last wrote into s_key_hex. Anything else in there was typed,
@@ -2417,6 +2424,62 @@ static void ui_startup_card(app_t *app)
                         &app->opts.debug)) {
             app->config_dirty = true;
         }
+
+        if (ui_checkbox(CLAY_ID("OverlayOn"), "Overlay",
+                        &app->opts.overlay)) {
+            app->config_dirty = true;
+        }
+
+        /*
+         * Where it appears. A button that cycles rather than six of them in a
+         * row: the corners are an either-or, and six buttons would set the
+         * card's width for the sake of a choice made once.
+         */
+        UI_FIELD_ROW() {
+            ui_field_caption("Overlay corner");
+
+            if (ui_button(CLAY_ID("OverlayPos"),
+                          osd_position_label(app->opts.overlay_position),
+                          false, app->opts.overlay, false)) {
+                app->opts.overlay_position =
+                    (osd_position_t)((app->opts.overlay_position + 1) %
+                                     OSD_POSITION_COUNT);
+                app->config_dirty = true;
+            }
+        }
+
+        UI_FIELD_ROW() {
+            ui_field_caption("Overlay time");
+
+            /* Re-rendered only when the value moved behind the field's back --
+               a configuration reloaded from the file, or one off the
+               controller. Typing is left alone. */
+            if (app->opts.overlay_ms != s_overlay_ms_seen) {
+                s_overlay_ms_seen = app->opts.overlay_ms;
+                snprintf(s_overlay_ms, sizeof(s_overlay_ms), "%d",
+                         app->opts.overlay_ms);
+            }
+
+            CLAY_AUTO_ID({
+                .layout = { .sizing = { CLAY_SIZING_FIXED(86),
+                                        CLAY_SIZING_FIT(0) } },
+            }) {
+                ui_text_field(CLAY_ID("OverlayMs"), s_overlay_ms,
+                              sizeof(s_overlay_ms), FONT_MONO, NULL);
+            }
+
+            CLAY_TEXT(CLAY_STRING("ms"), CLAY_TEXT_CONFIG({
+                .fontId = FONT_BODY, .fontSize = FONT_SIZE_SMALL,
+                .textColor = C_MUTED }));
+
+            int typed = osd_clamp_ms(atoi(s_overlay_ms));
+
+            if (typed != app->opts.overlay_ms) {
+                app->opts.overlay_ms = typed;
+                s_overlay_ms_seen = typed;  /* so the seeding above stays out */
+                app->config_dirty = true;
+            }
+        }
     }
 }
 
@@ -3845,6 +3908,13 @@ int ui_run(app_t *app)
         }
     }
 
+    /* A window of its own, so it survives this one going to the tray, which is
+       the whole case it exists for. Not fatal: everything else runs without
+       it, and the log is where to look for why it did not come up. */
+    if (!osd_start()) {
+        app_log(app, APP_LOG_ERROR, "overlay disabled: %s", osd_last_error());
+    }
+
     char font_path[512];
 
     if (respath_find("Roboto-Regular.ttf", font_path, sizeof(font_path))) {
@@ -3911,6 +3981,8 @@ int ui_run(app_t *app)
            changed it: the checkbox, a reload from the file and a document off
            the controller all reach the same flag. */
         tray_set_close_hides(app->opts.minimize_on_close);
+        osd_configure(app->opts.overlay, app->opts.overlay_position,
+                      app->opts.overlay_ms);
 
         watchdog_phase("tray_poll");
         if (tray_poll()) {      /* "Close IOMeeter" from the tray menu */
@@ -3960,8 +4032,21 @@ int ui_run(app_t *app)
             }
             /* Nothing is drawn while hidden, and EndDrawing() is what normally
                pumps input, so drain the queue explicitly. */
+            /* The one thing that still has something to show while there
+               is no window: it has to be put away on time here too. */
+            osd_tick();
+
             PollInputEvents();
-            WaitTime(0.05);
+
+            /*
+             * The overlay is the whole of what is on screen here, and a fader
+             * moving on the surface repaints its bar once per pass, so while
+             * the panel is up this runs at the panel's refresh rate -- the
+             * same rate the interface draws at when it has a window. With
+             * nothing showing there is nothing to animate and this goes back
+             * to idling: 20 Hz is plenty for noticing a click on the tray.
+             */
+            WaitTime(osd_visible() ? 1.0 / (double)s_target_fps : 0.05);
             continue;
         }
 
@@ -4851,6 +4936,8 @@ int ui_run(app_t *app)
 
         ui_draw_fps(app);
 
+        osd_tick();
+
         watchdog_phase("EndDrawing (present)");
         EndDrawing();
     }
@@ -4859,6 +4946,7 @@ int ui_run(app_t *app)
         UnloadTexture(s_wheel);
     }
     watchdog_stop();
+    osd_stop();
     tray_shutdown();
     Clay_Raylib_Close();
     free(memory);

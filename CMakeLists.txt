@@ -35,6 +35,7 @@ add_executable(IOMeeter
     include/volume.c
     libs/cJSON.c
     include/mixer.c
+    include/osd.c
 )
 
 # Clay is a single-header library; exactly one translation unit may define its
@@ -179,6 +180,25 @@ else()
             "libX11 not found: profiles will not switch on their own.
 "
             "  Debian/Ubuntu/Mint: sudo apt install libx11-dev")
+    endif()
+
+    # The overlay is an override-redirect X11 window, and the pointer passes
+    # through it by way of an empty shape input region, which is Xext. Both or
+    # neither: a window that swallows clicks over a game is worse than none.
+    # Optional, like everything else here -- without it osd_start() reports
+    # itself unavailable and the rest of the program is unaffected.
+    if(PkgConfig_FOUND)
+        pkg_check_modules(XEXT QUIET IMPORTED_TARGET xext)
+    endif()
+    if(TARGET PkgConfig::X11 AND TARGET PkgConfig::XEXT)
+        target_link_libraries(IOMeeter PRIVATE PkgConfig::XEXT)
+        target_compile_definitions(IOMeeter PRIVATE OSD_HAVE_X11)
+        message(STATUS "overlay: X11 with XShape")
+    else()
+        message(WARNING
+            "libXext not found: there will be no on-screen overlay.
+"
+            "  Debian/Ubuntu/Mint: sudo apt install libxext-dev")
     endif()
 endif()
 
