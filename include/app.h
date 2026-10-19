@@ -166,6 +166,18 @@ typedef struct {
        the end of the poll rather than per packet. */
     bool slider_volume_dirty[APP_FADER_COUNT];
 
+    /*
+     * The last decibel figure each fader put on the wire, and whether it has
+     * put one there at all. A drag would otherwise send a packet per frame
+     * for a value Voicemeeter shows to a tenth of a decibel.
+     */
+    bool  vban_sent[APP_FADER_COUNT];
+    float vban_sent_db[APP_FADER_COUNT];
+
+    /* What the passthrough was set to last time it was looked at, so the
+       moment it is switched either way can be acted on once. */
+    bool voicemeeter_seen;
+
     /* Latches once a fader's applications match no audio session, so the
        warning is written when that starts rather than on every frame. */
     bool slider_unmatched[APP_FADER_COUNT];

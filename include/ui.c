@@ -13,6 +13,7 @@
 #include "keysend.h"
 #include "media.h"
 #include "osd.h"
+#include "vban.h"
 #include "watchdog.h"
 #include "respath.h"
 #include "tray.h"
@@ -177,6 +178,14 @@ static bool s_key_record;
 static char s_overlay_ms[8];
 static int  s_overlay_ms_seen = -1;
 
+/* The VBAN settings as typed, for the same reason the duration above is text:
+   a half-entered port must not be clamped to something else under the caret,
+   and an address is not an address until the last digit is in. */
+static char s_vban_ip[VBAN_IP_MAX];
+static char s_vban_name[VBAN_NAME_MAX];
+static char s_vban_port[8];
+static int  s_vban_port_seen = -1;
+
 static char s_key_hex[8];
 
 /* What the wheel last wrote into s_key_hex. Anything else in there was typed,
@@ -287,6 +296,13 @@ static void ui_on_fader_change(int id, int value, void *user)
 
 /* A fader column is wider than its track so filenames have room underneath. */
 #define FADER_COLUMN_W  84
+
+/* The strip selector's row under each fader, and the column's own childGap
+   above it. Only there while the Voicemeeter passthrough is on, and counted
+   against the track when it is. */
+#define STRIP_PICK_H    24
+#define STRIP_PICK_GAP   6
+
 #define APP_ROW_H       24
 #define APP_LIST_ROWS   5
 #define APP_LIST_H      (APP_ROW_H * APP_LIST_ROWS)
@@ -310,9 +326,17 @@ static int s_target_fps = UI_FALLBACK_FPS;
  * so whatever they allot beyond it is the rest of the interface; the strip
  * takes what is left of the real window and is clamped to a usable range.
  */
-static int ui_fader_height(bool debug)
+static int ui_fader_height(bool debug, bool voicemeeter)
 {
     int chrome = UI_WINDOW_HEIGHT_FOR(debug) - FADER_TRACK_HEIGHT;
+
+    /* The selector takes its row out of the track rather than out of the
+       window: left uncounted, the strip grows by that much and pushes the
+       application lists under the bottom edge. */
+    if (voicemeeter) {
+        chrome += STRIP_PICK_H + STRIP_PICK_GAP;
+    }
+
     int available = GetScreenHeight() - chrome;
 
     if (available > FADER_TRACK_HEIGHT) {
@@ -487,6 +511,170 @@ static bool ui_danger_button(Clay_ElementId id, const char *label, bool enabled)
             .textColor = enabled ? COL(0xff, 0xff, 0xff, 255) : C_MUTED }));
     }
     return hit;
+}
+
+/*
+ * The strip names, written out rather than formatted.
+ *
+ * Clay keeps the pointer it is given rather than copying the text, and does
+ * not read it until the render pass, so a label built on the stack would be
+ * gone by the time it was wanted. Literals have no such problem and the list
+ * is eight long.
+ */
+static const char *const s_strip_names[VBAN_STRIP_COUNT] = {
+    "Strip 0", "Strip 1", "Strip 2", "Strip 3",
+    "Strip 4", "Strip 5", "Strip 6", "Strip 7",
+};
+
+/* Which fader's list is hanging open, or -1. One at a time: two lists down at
+   once is two things claiming the next click. */
+static int s_strip_open = -1;
+
+/* A row of the open list. */
+#define STRIP_ROW_H 22
+
+/*
+ * Which Voicemeeter strip a fader drives, shown under the fader itself.
+ *
+ * A dropdown: the list hangs off the bottom of the button, attached to it by
+ * Clay rather than placed by hand, so it follows the column wherever the
+ * layout puts it. Floating, so it covers the "+" and the application list
+ * underneath it and Clay keeps the pointer from reaching either.
+ *
+ * The number shown is the one Voicemeeter's own script uses, Strip[0] being
+ * the first, so what is on the button is what would be typed over there.
+ *
+ * @return true if the choice changed.
+ */
+static bool ui_strip_select(int fader, int *strip)
+{
+    bool hit = false;
+
+    if (fader < 0 || fader >= APP_FADER_COUNT) {
+        return false;
+    }
+    if (*strip < 0 || *strip >= VBAN_STRIP_COUNT) {
+        *strip = 0;
+    }
+
+    bool open = (s_strip_open == fader);
+
+    CLAY(CLAY_IDI("StripPick", fader), {
+        .layout = {
+            .sizing = { CLAY_SIZING_GROW(0),
+                        CLAY_SIZING_FIXED(STRIP_PICK_H) },
+            .padding = { 8, 6, 0, 0 },
+            .childGap = 4,
+            .childAlignment = { .y = CLAY_ALIGN_Y_CENTER },
+        },
+        .backgroundColor = mix(C_FIELD, C_LINE, open || Clay_Hovered()),
+        .cornerRadius = CLAY_CORNER_RADIUS(6),
+        .border = { .color = open ? C_ACCENT : C_BORDER,
+                    .width = { 1, 1, 1, 1 } },
+    }) {
+        if (clicked(true)) {
+            s_strip_open = open ? -1 : fader;
+        }
+
+        CLAY_AUTO_ID({ .layout = { .sizing = { CLAY_SIZING_GROW(0) } } }) {
+            CLAY_TEXT(dyn(s_strip_names[*strip]), CLAY_TEXT_CONFIG({
+                .fontId = FONT_BODY, .fontSize = FONT_SIZE_APP_LIST,
+                .textColor = C_MUTED }));
+        }
+
+        /* Which way it will go, in the one glyph the loaded fonts are certain
+           to carry. */
+        CLAY_TEXT(dyn(open ? "^" : "v"), CLAY_TEXT_CONFIG({
+            .fontId = FONT_BODY, .fontSize = FONT_SIZE_APP_LIST,
+            .textColor = C_MUTED }));
+
+        if (open) {
+            CLAY(CLAY_IDI("StripList", fader), {
+                .layout = {
+                    .sizing = { CLAY_SIZING_FIXED(FADER_COLUMN_W),
+                                CLAY_SIZING_FIT(0) },
+                    .padding = CLAY_PADDING_ALL(4),
+                    .childGap = 1,
+                    .layoutDirection = CLAY_TOP_TO_BOTTOM,
+                },
+                .backgroundColor = C_CARD,
+                .cornerRadius = CLAY_CORNER_RADIUS(6),
+                .border = { .color = C_ACCENT, .width = { 1, 1, 1, 1 } },
+                .floating = {
+                    .attachTo = CLAY_ATTACH_TO_PARENT,
+                    /* The list's top left on the button's bottom left, which
+                       is what hanging underneath it means. */
+                    .attachPoints = { CLAY_ATTACH_POINT_LEFT_TOP,
+                                      CLAY_ATTACH_POINT_LEFT_BOTTOM },
+                    .offset = { 0.0f, 2.0f },
+                    .zIndex = 30,
+                },
+            }) {
+                for (int n = 0; n < VBAN_STRIP_COUNT; n++) {
+                    bool chosen = (n == *strip);
+
+                    /* Indexed across every fader, so two lists can never be
+                       handed the same identifier. */
+                    CLAY(CLAY_IDI("StripRow", fader * VBAN_STRIP_COUNT + n), {
+                        .layout = {
+                            .sizing = { CLAY_SIZING_GROW(0),
+                                        CLAY_SIZING_FIXED(STRIP_ROW_H) },
+                            .padding = { 6, 6, 0, 0 },
+                            .childAlignment = { .y = CLAY_ALIGN_Y_CENTER },
+                        },
+                        .backgroundColor = mix(chosen ? C_LINE : C_CARD,
+                                               C_ACCENT, Clay_Hovered()),
+                        .cornerRadius = CLAY_CORNER_RADIUS(4),
+                    }) {
+                        if (clicked(true)) {
+                            hit = (*strip != n);
+                            *strip = n;
+                            s_strip_open = -1;
+                        }
+
+                        CLAY_TEXT(dyn(s_strip_names[n]), CLAY_TEXT_CONFIG({
+                            .fontId = FONT_BODY,
+                            .fontSize = FONT_SIZE_APP_LIST,
+                            .textColor = chosen ? C_FG : C_MUTED }));
+                    }
+                }
+            }
+        }
+    }
+
+    return hit;
+}
+
+/*
+ * A list left hanging when the pointer goes elsewhere.
+ *
+ * Closed on the press, and the release that follows is swallowed: Clay's
+ * buttons act on the release, so without that the second half of the click
+ * that dismissed the list would land on whatever the list was covering.
+ */
+static void ui_strip_dismiss(void)
+{
+    if (s_strip_open < 0 || !IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+        return;
+    }
+
+    Vector2 mouse = GetMousePosition();
+    Clay_ElementId ids[2] = { CLAY_IDI("StripList", s_strip_open),
+                              CLAY_IDI("StripPick", s_strip_open) };
+
+    for (int i = 0; i < 2; i++) {
+        Clay_ElementData at = Clay_GetElementData(ids[i]);
+        Clay_BoundingBox b = at.boundingBox;
+
+        if (at.found &&
+            CheckCollisionPointRec(mouse,
+                (Rectangle){ b.x, b.y, b.width, b.height })) {
+            return;     /* the press belongs to the list or to its button */
+        }
+    }
+
+    s_strip_open = -1;
+    s_swallow_release = true;
 }
 
 static bool ui_checkbox(Clay_ElementId id, const char *label, bool *value)
@@ -2480,6 +2668,139 @@ static void ui_startup_card(app_t *app)
                 app->config_dirty = true;
             }
         }
+
+        /* What the card below is for. Last in the list because it is the one
+           setting here that turns another card on. */
+        if (ui_checkbox(CLAY_ID("VoicemeeterOn"),
+                        "Enable Voicemeeter passthrough",
+                        &app->opts.voicemeeter)) {
+            app->config_dirty = true;
+        }
+    }
+}
+
+/* A field that follows the configuration while nothing is typing into it. */
+static void ui_vban_seed(char *buffer, size_t cap, const char *value)
+{
+    if (s_focus != buffer && strcmp(buffer, value) != 0) {
+        snprintf(buffer, cap, "%s", value);
+    }
+}
+
+/*
+ * Where Voicemeeter is, for the passthrough the card above switches on.
+ *
+ * With the passthrough off the three settings are shown rather than offered.
+ * There is nothing to configure while nothing is being sent, and a field the
+ * caret never enters only invites the attempt.
+ *
+ * Nothing here returns early: a Clay block is a loop, and leaving one from the
+ * inside skips the call that closes the element.
+ */
+static void ui_vban_card(app_t *app)
+{
+    bool on = app->opts.voicemeeter;
+
+    UI_CARD_LEFT(CLAY_ID("VbanCard"), PROFILES_MIN_W) {
+        ui_card_title("VBAN");
+
+        /* The buffers follow the configuration unless the caret is in one: a
+           file loaded from the menu has to show through, and typing must not
+           be overwritten half-way through an address. */
+        ui_vban_seed(s_vban_ip, sizeof(s_vban_ip), app->opts.vban_ip);
+        ui_vban_seed(s_vban_name, sizeof(s_vban_name), app->opts.vban_name);
+
+        if (app->opts.vban_port != s_vban_port_seen) {
+            s_vban_port_seen = app->opts.vban_port;
+            snprintf(s_vban_port, sizeof(s_vban_port), "%d",
+                     app->opts.vban_port);
+        }
+
+        UI_FIELD_ROW() {
+            ui_field_caption("Address");
+
+            if (on) {
+                ui_text_field(CLAY_ID("VbanIp"), s_vban_ip,
+                              sizeof(s_vban_ip), FONT_MONO, NULL);
+            } else {
+                ui_value_label(CLAY_ID("VbanIpShown"), app->opts.vban_ip, "");
+            }
+        }
+
+        UI_FIELD_ROW() {
+            ui_field_caption("Port");
+
+            CLAY_AUTO_ID({
+                .layout = { .sizing = { CLAY_SIZING_FIXED(96),
+                                        CLAY_SIZING_FIT(0) } },
+            }) {
+                if (on) {
+                    ui_text_field(CLAY_ID("VbanPort"), s_vban_port,
+                                  sizeof(s_vban_port), FONT_MONO, NULL);
+                } else {
+                    ui_value_label(CLAY_ID("VbanPortShown"), s_vban_port, "");
+                }
+            }
+        }
+
+        UI_FIELD_ROW() {
+            ui_field_caption("Stream name");
+
+            if (on) {
+                ui_text_field(CLAY_ID("VbanName"), s_vban_name,
+                              sizeof(s_vban_name), FONT_MONO, NULL);
+            } else {
+                ui_value_label(CLAY_ID("VbanNameShown"), app->opts.vban_name,
+                               "");
+            }
+        }
+
+        if (!on) {
+            CLAY_TEXT(CLAY_STRING("Switched off in Options."),
+                      CLAY_TEXT_CONFIG({
+                          .fontId = FONT_BODY, .fontSize = FONT_SIZE_SMALL,
+                          .textColor = C_MUTED }));
+        } else if (!vban_available()) {
+            /* An address that will not parse is the one mistake here that is
+               both easy to make and otherwise silent. */
+            CLAY_TEXT(dyn(vban_last_error()), CLAY_TEXT_CONFIG({
+                .fontId = FONT_BODY, .fontSize = FONT_SIZE_SMALL,
+                .textColor = C_DANGER }));
+        } else {
+            CLAY_TEXT(CLAY_STRING("Voicemeeter's VBAN dialog needs an "
+                                  "incoming TEXT stream of this name."),
+                      CLAY_TEXT_CONFIG({
+                          .fontId = FONT_BODY, .fontSize = FONT_SIZE_SMALL,
+                          .textColor = C_MUTED }));
+        }
+
+        /* Typing goes back the other way, and only while there is something to
+           type into. An empty field is somebody mid-edit rather than somebody
+           asking for a blank address, so it is not committed. */
+        if (on) {
+            if (s_vban_ip[0] != 0 &&
+                strcmp(s_vban_ip, app->opts.vban_ip) != 0) {
+                snprintf(app->opts.vban_ip, sizeof(app->opts.vban_ip), "%s",
+                         s_vban_ip);
+                app->config_dirty = true;
+            }
+
+            if (s_vban_name[0] != 0 &&
+                strcmp(s_vban_name, app->opts.vban_name) != 0) {
+                snprintf(app->opts.vban_name, sizeof(app->opts.vban_name),
+                         "%s", s_vban_name);
+                app->config_dirty = true;
+            }
+
+            int port = atoi(s_vban_port);
+
+            if (port >= VBAN_PORT_MIN && port <= VBAN_PORT_MAX &&
+                port != app->opts.vban_port) {
+                app->opts.vban_port = port;
+                s_vban_port_seen = port;   /* so the seeding above stays out */
+                app->config_dirty = true;
+            }
+        }
     }
 }
 
@@ -3394,6 +3715,10 @@ static ui_bar_t s_step_bar;
    this card and uses that one, and the two would inherit each other's drag. */
 static ui_bar_t s_profile_bar;
 
+/* The configuration tab scrolls as a whole, the profiles list inside it
+   scrolls on its own, and a drag belongs to exactly one of them. */
+static ui_bar_t s_config_bar;
+
 /*
  * The entry at @p y, measured down from the top of the scrolled content.
  *
@@ -3915,6 +4240,13 @@ int ui_run(app_t *app)
         app_log(app, APP_LOG_ERROR, "overlay disabled: %s", osd_last_error());
     }
 
+    /* The passthrough's socket, opened whatever the setting says: the box can
+       be ticked while the program is running, and an idle UDP socket costs a
+       file descriptor and nothing else. */
+    if (!vban_start()) {
+        app_log(app, APP_LOG_ERROR, "VBAN disabled: %s", vban_last_error());
+    }
+
     char font_path[512];
 
     if (respath_find("Roboto-Regular.ttf", font_path, sizeof(font_path))) {
@@ -3983,6 +4315,8 @@ int ui_run(app_t *app)
         tray_set_close_hides(app->opts.minimize_on_close);
         osd_configure(app->opts.overlay, app->opts.overlay_position,
                       app->opts.overlay_ms);
+        vban_configure(app->opts.voicemeeter, app->opts.vban_ip,
+                       app->opts.vban_port, app->opts.vban_name);
 
         watchdog_phase("tray_poll");
         if (tray_poll()) {      /* "Close IOMeeter" from the tray menu */
@@ -4163,6 +4497,8 @@ int ui_run(app_t *app)
         ui_log_measure();
         ui_log_interact(app);
 
+        ui_strip_dismiss();
+
         /* Not while the colour panel or the question is up: both float over
            the step list, and a scrollbar underneath a panel must not still
            take the drag. */
@@ -4174,6 +4510,10 @@ int ui_run(app_t *app)
            thing on this tab that floats above the card. */
         if (s_tab == TAB_CONFIG && s_picker < 0) {
             ui_bar_interact(CLAY_ID("ProfileRows"), &s_profile_bar);
+
+            /* The tab itself scrolls too. Its bar is at the right-hand edge of
+               the whole panel, well clear of the profiles list's own. */
+            ui_bar_interact(CLAY_ID("ConfigTab"), &s_config_bar);
         }
         if (s_key_picker) {
             ui_bar_interact(CLAY_ID("KeyNameRows"), &s_step_bar);
@@ -4188,7 +4528,8 @@ int ui_run(app_t *app)
             }
         }
 
-        float fader_h = (float)ui_fader_height(app->opts.debug);
+        float fader_h = (float)ui_fader_height(app->opts.debug,
+                                               app->opts.voicemeeter);
 
         /*
          * Clay stops the pointer at a floating element on its own, but the
@@ -4436,14 +4777,24 @@ int ui_run(app_t *app)
             if (s_tab == TAB_CONFIG) {
             CLAY(CLAY_ID("ConfigTab"), {
                 .layout = {
-                    .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIT(0) },
+                    /* Grows rather than fits, because a container that fits
+                       its content is as tall as its content and has nothing
+                       left to scroll. */
+                    .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0) },
                     .childGap = 6,
                     .layoutDirection = CLAY_TOP_TO_BOTTOM,
                     /* Left, not centred: two rows of different widths centred
                        against each other read as two separate things rather
                        than as a grid, and the left edge is the one they have
                        in common. */
+                    /* Clear on the right for the scrollbar, which raylib draws
+                       over the panel rather than Clay laying it out: LOG_BAR_W
+                       and the four pixels either side of it. */
+                    .padding = { 0, 18, 0, 0 },
                 },
+                /* More cards than window, since the VBAN card went in. */
+                .clip = { .vertical = true,
+                          .childOffset = Clay_GetScrollOffset() },
             }) {
                 /* Reading order across the grid: options, profiles, then
                    the two LED cards. Side by side rather than stacked, which
@@ -4457,6 +4808,8 @@ int ui_run(app_t *app)
                     ui_startup_card(app);
                     ui_profiles_card(app);
                 }
+
+                ui_vban_card(app);
 
                 CLAY(CLAY_ID("LedCards"), {
                     .layout = {
@@ -4584,8 +4937,28 @@ int ui_run(app_t *app)
                                         CLAY_SIZING_FIXED(fader_h) } },
                                 }) {}
 
+                                /* Only while something is listening for it: a
+                                   strip number under a fader that drives no
+                                   strip is a setting with no effect. */
+                                if (app->opts.voicemeeter &&
+                                    ui_strip_select(i,
+                                        &app->sliders[i].vban_strip)) {
+                                    /* The strip just chosen is still wherever
+                                       it was left, so the fader is pushed at
+                                       it now rather than at the next
+                                       movement. */
+                                    app->vban_sent[i] = false;
+                                    app_apply_volume(app, i);
+                                    app->config_dirty = true;
+                                }
+
+                                /* Nothing to add applications to while the
+                                   passthrough owns the fader: the list is left
+                                   showing so it is not lost, but it drives
+                                   nothing until the box is cleared again. */
                                 if (ui_button(CLAY_IDI("AddApp", i), "+",
-                                              false, true, true)) {
+                                              false, !app->opts.voicemeeter,
+                                              true)) {
                                     ui_add_app(app, i);
                                 }
 
@@ -4635,7 +5008,7 @@ int ui_run(app_t *app)
                                                                  ? C_WARN : C_LINE,
                                                 .cornerRadius = CLAY_CORNER_RADIUS(3),
                                             }) {
-                                                if (clicked(true)) {
+                                                if (clicked(!app->opts.voicemeeter)) {
                                                     s_remove_slider = i;
                                                     s_remove_index = a;
                                                 }
@@ -4865,6 +5238,22 @@ int ui_run(app_t *app)
          * brightness knob over the main one.
          */
         if (s_tab == TAB_CONFIG) {
+            /*
+             * Inside the panel that scrolls, and painted straight to raylib
+             * rather than emitted as Clay commands, so nothing clips them: the
+             * marker and the two knobs would be drawn over the header once the
+             * card they belong to had been scrolled past it. The scissor is
+             * what Clay would have done for them.
+             */
+            Clay_ElementData tab = Clay_GetElementData(CLAY_ID("ConfigTab"));
+
+            if (tab.found) {
+                BeginScissorMode((int)tab.boundingBox.x,
+                                 (int)tab.boundingBox.y,
+                                 (int)tab.boundingBox.width,
+                                 (int)tab.boundingBox.height);
+            }
+
             Clay_ElementData wheel_now = Clay_GetElementData(wheel_id);
             if (wheel_now.found) {
                 ui_draw_wheel_marker(app->hue, app->sat, app->val,
@@ -4872,6 +5261,10 @@ int ui_run(app_t *app)
             }
             ui_draw_slider_knob(slider_id, app->val);
             ui_draw_slider_knob(CLAY_ID("LedBrightness"), app->led_brightness);
+
+            if (tab.found) {
+                EndScissorMode();
+            }
         }
 
         if (s_key_wheel && s_key_editor >= 0) {
@@ -4931,7 +5324,26 @@ int ui_run(app_t *app)
             ui_bar_draw(CLAY_ID("PickerRows"), &s_step_bar);
         }
         if (s_tab == TAB_CONFIG) {
+            Clay_ElementData tab = Clay_GetElementData(CLAY_ID("ConfigTab"));
+
+            /* The profiles list is inside the panel that scrolls, so its bar
+               stops at the edge of that panel like everything else in it. */
+            if (tab.found) {
+                BeginScissorMode((int)tab.boundingBox.x,
+                                 (int)tab.boundingBox.y,
+                                 (int)tab.boundingBox.width,
+                                 (int)tab.boundingBox.height);
+            }
+
             ui_bar_draw(CLAY_ID("ProfileRows"), &s_profile_bar);
+
+            if (tab.found) {
+                EndScissorMode();
+            }
+
+            /* The panel's own bar, which belongs to it rather than to anything
+               inside it, and so is not clipped by it. */
+            ui_bar_draw(CLAY_ID("ConfigTab"), &s_config_bar);
         }
 
         ui_draw_fps(app);
@@ -4947,6 +5359,7 @@ int ui_run(app_t *app)
     }
     watchdog_stop();
     osd_stop();
+    vban_stop();
     tray_shutdown();
     Clay_Raylib_Close();
     free(memory);

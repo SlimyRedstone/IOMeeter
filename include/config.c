@@ -114,11 +114,21 @@ void config_defaults(config_slider_t *out, int count, config_opts_t *opts)
         opts->overlay           = CONFIG_OVERLAY_DEFAULT;
         opts->overlay_position  = CONFIG_OVERLAY_POSITION_DEFAULT;
         opts->overlay_ms        = OSD_MS_DEFAULT;
+        opts->voicemeeter       = CONFIG_VOICEMEETER_DEFAULT;
+        opts->vban_port         = VBAN_PORT_DEFAULT;
+
+        snprintf(opts->vban_ip, sizeof(opts->vban_ip), "%s", VBAN_IP_DEFAULT);
+        snprintf(opts->vban_name, sizeof(opts->vban_name), "%s",
+                 VBAN_NAME_DEFAULT);
     }
 
     for (int i = 0; i < count; i++) {
         out[i].id = i;
         out[i].app_count = 0;
+
+        /* Straight across until somebody says otherwise, which is what the
+           four of them lining up with the first four strips looks like. */
+        out[i].vban_strip = i;
         if (i < known) {
             out[i].value = DEFAULTS[i].value;
             snprintf(out[i].name, CONFIG_NAME_MAX, "%s", DEFAULTS[i].name);
@@ -282,6 +292,32 @@ bool config_from_text(const char *text, config_slider_t *out, int count,
 
         read_number(from, "overlay_ms", &opts->overlay_ms);
         opts->overlay_ms = osd_clamp_ms(opts->overlay_ms);
+
+        read_flag(from, "voicemeeter", &opts->voicemeeter);
+
+        /* An object of its own, so a file carrying none of it keeps the
+           defaults rather than being half configured. */
+        const cJSON *vban = cJSON_GetObjectItemCaseSensitive(from, "vban");
+
+        if (cJSON_IsObject(vban)) {
+            const char *address = read_name(vban, "ip");
+            const char *stream = read_name(vban, "name");
+
+            if (address != NULL) {
+                snprintf(opts->vban_ip, sizeof(opts->vban_ip), "%s", address);
+            }
+            if (stream != NULL) {
+                snprintf(opts->vban_name, sizeof(opts->vban_name), "%s",
+                         stream);
+            }
+
+            read_number(vban, "port", &opts->vban_port);
+
+            if (opts->vban_port < VBAN_PORT_MIN ||
+                opts->vban_port > VBAN_PORT_MAX) {
+                opts->vban_port = VBAN_PORT_DEFAULT;
+            }
+        }
     }
 
     const cJSON *sliders = cJSON_GetObjectItemCaseSensitive(root, "sliders");
@@ -328,6 +364,16 @@ bool config_from_text(const char *text, config_slider_t *out, int count,
         copy_string(slider, "name", out[id].name, CONFIG_NAME_MAX);
         load_apps(slider, &out[id]);
 
+        read_number(slider, "vban_strip", &out[id].vban_strip);
+
+        /* Back to lining up rather than to zero: a hand-edited number out of
+           range is a mistake, and four faders stacked on strip 0 is a worse
+           answer to it than the arrangement they started with. */
+        if (out[id].vban_strip < 0 ||
+            out[id].vban_strip >= VBAN_STRIP_COUNT) {
+            out[id].vban_strip = id;
+        }
+
         out[id].id = id;
         found++;
     }
@@ -367,7 +413,20 @@ char *config_to_text(const config_slider_t *in, int count,
                                  osd_position_id(opts->overlay_position))
              != NULL) &&
         (cJSON_AddNumberToObject(options, "overlay_ms",
-                                 opts->overlay_ms) != NULL);
+                                 opts->overlay_ms) != NULL) &&
+        (cJSON_AddBoolToObject(options, "voicemeeter",
+                               opts->voicemeeter) != NULL);
+
+    /* Nested rather than three vban_ prefixes among the flags, for the same
+       reason the flags themselves were gathered under "options". */
+    if (built) {
+        cJSON *vban = cJSON_AddObjectToObject(options, "vban");
+
+        built = vban != NULL &&
+            (cJSON_AddStringToObject(vban, "ip", opts->vban_ip) != NULL) &&
+            (cJSON_AddNumberToObject(vban, "port", opts->vban_port) != NULL) &&
+            (cJSON_AddStringToObject(vban, "name", opts->vban_name) != NULL);
+    }
     cJSON *sliders = cJSON_AddArrayToObject(root, "sliders");
     built = built && (sliders != NULL);
 
@@ -381,7 +440,9 @@ char *config_to_text(const config_slider_t *in, int count,
 
         built = cJSON_AddNumberToObject(slider, "id", in[i].id) &&
                 cJSON_AddNumberToObject(slider, "value", in[i].value) &&
-                cJSON_AddStringToObject(slider, "name", in[i].name);
+                cJSON_AddStringToObject(slider, "name", in[i].name) &&
+                cJSON_AddNumberToObject(slider, "vban_strip",
+                                        in[i].vban_strip);
 
         cJSON *apps = cJSON_AddArrayToObject(slider, "apps");
         built = built && (apps != NULL);

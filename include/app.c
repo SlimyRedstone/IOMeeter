@@ -13,6 +13,7 @@
 #include "keysend.h"
 #include "media.h"
 #include "osd.h"
+#include "vban.h"
 #include "volume.h"
 #include "proto.h"
 #include "usbdev.h"
@@ -904,11 +905,78 @@ static void app_media_settle(app_t *a)
     }
 }
 
+/*
+ * The applications a fader drives, in the form the volume worker wants.
+ *
+ * @param names Receives up to CONFIG_APPS_MAX pointers into the slider's own
+ *              storage. Initialised by the caller, because a fader with no
+ *              applications hands the worker an array it never reads and the
+ *              compiler cannot see that far.
+ * @return how many were written.
+ */
+static int slider_app_names(const app_t *a, int id, const char **names)
+{
+    int count = a->sliders[id].app_count;
+
+    if (count > CONFIG_APPS_MAX) {
+        count = CONFIG_APPS_MAX;
+    }
+    for (int i = 0; i < count; i++) {
+        names[i] = a->sliders[id].apps[i].name;
+    }
+    return count;
+}
+
+/*
+ * Handing this machine's mixer over, or taking it back.
+ *
+ * The two are alternatives rather than a pair: with the passthrough on the
+ * faders belong to Voicemeeter, and leaving the per-application volumes
+ * wherever the faders last put them would strand an application turned down
+ * with nothing left driving it. So each one goes back to unity on the way in,
+ * and is picked up again on the way out.
+ *
+ * Watched as a transition rather than hooked onto the checkbox: the setting
+ * also arrives from a file loaded off the menu and from a document off the
+ * controller, and one watcher covers all three.
+ */
+static void app_mixer_handover(app_t *a)
+{
+    if (a->opts.voicemeeter == a->voicemeeter_seen) {
+        return;
+    }
+    a->voicemeeter_seen = a->opts.voicemeeter;
+
+    for (int i = 0; i < APP_FADER_COUNT; i++) {
+        if (!a->opts.voicemeeter) {
+            app_apply_volume(a, i);     /* back under the faders */
+            continue;
+        }
+
+        if (!volume_available()) {
+            continue;
+        }
+
+        const char *names[CONFIG_APPS_MAX] = { NULL };
+        int count = slider_app_names(a, i, names);
+
+        volume_set(i, names, count, 1.0f);
+
+        /* Nothing is being matched against any more, so a complaint left over
+           from the last movement is no longer true. */
+        a->slider_unmatched[i] = false;
+    }
+}
+
 void app_poll(app_t *a)
 {
     /* Before the connection is looked at: a pad key works with nothing
        plugged in, and so does the failure it may report. */
     app_media_settle(a);
+
+    /* Likewise: the passthrough can be switched with nothing attached, and
+       the mixer it hands back is this machine's own. */
+    app_mixer_handover(a);
 
     if (!a->connected) {
         return;
@@ -1021,9 +1089,67 @@ static float slider_to_gain(int value, int max)
     return t * t * t;
 }
 
+/*
+ * The fader, as Voicemeeter's own fader.
+ *
+ * Driven from app_apply_volume() rather than from the device path alone, so a
+ * fader dragged in the window moves the strip too: the passthrough is about
+ * where the value ended up, not about what moved it.
+ *
+ * Which strip each fader drives is the fader's own setting, chosen under it
+ * on the main tab. It defaults to lining up -- fader n on strip n -- which is
+ * what somebody plugging this in for the first time expects.
+ */
+static void app_push_vban(app_t *a, int id)
+{
+    if (!a->opts.voicemeeter || !vban_available()) {
+        return;
+    }
+
+    float db = vban_fader_to_db(a->sliders[id].value, APP_FADER_MAX);
+
+    if (a->vban_sent[id]) {
+        float moved = db - a->vban_sent_db[id];
+
+        if (moved < 0.0f) {
+            moved = -moved;
+        }
+
+        /*
+         * Exactly where it was: a fader held at either end of its travel would
+         * otherwise resend on every frame, the clamp having stopped the figure
+         * changing long before the pointer did.
+         */
+        if (moved == 0.0f) {
+            return;
+        }
+
+        /* Below what the strip can display, and the far end has to parse
+           every packet that arrives. */
+        if (moved < 0.1f && db > VBAN_DB_MIN && db < VBAN_DB_MAX) {
+            return;
+        }
+    }
+
+    if (vban_set_strip_gain(a->sliders[id].vban_strip, db)) {
+        a->vban_sent[id] = true;
+        a->vban_sent_db[id] = db;
+    }
+}
+
 void app_apply_volume(app_t *a, int id)
 {
-    if (id < 0 || id >= APP_FADER_COUNT || !volume_available()) {
+    if (id < 0 || id >= APP_FADER_COUNT) {
+        return;
+    }
+
+    /* Before the mixer is tested, not after: the passthrough is somebody
+       else's mixer and does not care whether this machine has one. */
+    app_push_vban(a, id);
+
+    /* One mixer at a time. Driving both would scale an application twice from
+       the one movement -- once here and once inside Voicemeeter. */
+    if (a->opts.voicemeeter || !volume_available()) {
         return;
     }
 
@@ -1031,18 +1157,8 @@ void app_apply_volume(app_t *a, int id)
 
     /* Handed to the worker and applied there: the audio stack can take
        seconds to answer, and the interface must not wait for it. */
-    /* Initialised because a fader with no applications hands the worker an
-       array it never reads; the compiler cannot see that far and reports it
-       as passing something uninitialised. */
     const char *names[CONFIG_APPS_MAX] = { NULL };
-    int count = a->sliders[id].app_count;
-
-    if (count > CONFIG_APPS_MAX) {
-        count = CONFIG_APPS_MAX;
-    }
-    for (int i = 0; i < count; i++) {
-        names[i] = a->sliders[id].apps[i].name;
-    }
+    int count = slider_app_names(a, id, names);
 
     volume_set(id, names, count, gain);
 

@@ -36,6 +36,7 @@ add_executable(IOMeeter
     libs/cJSON.c
     include/mixer.c
     include/osd.c
+    include/vban.c
 )
 
 # Clay is a single-header library; exactly one translation unit may define its
@@ -108,7 +109,9 @@ if(WIN32)
     # store apps out of the running-application list; version reads the
     # FileDescription that gives each one its name.
     target_link_libraries(IOMeeter PRIVATE
-        shell32 user32 gdi32 comdlg32 ole32 mmdevapi dwmapi version
+        # ws2_32 carries the UDP socket vban.c sends Voicemeeter's fader
+        # commands over.
+        shell32 user32 gdi32 comdlg32 ole32 mmdevapi dwmapi version ws2_32
         # runtimeobject carries the Windows runtime entry points media.c uses
         # to reach one application's media session rather than the global one.
         runtimeobject)

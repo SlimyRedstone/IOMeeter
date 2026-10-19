@@ -33,6 +33,9 @@
 /* For osd_position_t: the overlay's corner is stored with the other flags. */
 #include "osd.h"
 
+/* For the VBAN defaults and the lengths its two names are stored at. */
+#include "vban.h"
+
 #define CONFIG_NAME_MAX 32
 #define CONFIG_PATH_MAX 260
 #define CONFIG_APPS_MAX 16
@@ -54,6 +57,12 @@ typedef struct {
 
     config_app_t apps[CONFIG_APPS_MAX];
     int          app_count;
+
+    /* Which Voicemeeter strip this fader drives when the passthrough is on,
+       indexed the way Voicemeeter's own script indexes them. Per fader rather
+       than per installation: the whole point of choosing is that the four of
+       them do not have to line up with the first four strips. */
+    int vban_strip;
 } config_slider_t;
 
 /**
@@ -86,6 +95,10 @@ const char *config_basename(const char *path);
 #define CONFIG_OVERLAY_DEFAULT          true
 #define CONFIG_OVERLAY_POSITION_DEFAULT OSD_TOP_RIGHT
 
+/* Off. A passthrough that starts moving faders in another program the moment
+   it is installed is not something to discover by accident. */
+#define CONFIG_VOICEMEETER_DEFAULT      false
+
 /*
  * The flags that sit beside the fader strip in config.json, under "options".
  *
@@ -110,6 +123,14 @@ typedef struct {
     bool           overlay;
     osd_position_t overlay_position;
     int            overlay_ms;
+
+    /* The Voicemeeter passthrough, and where to reach it. The three VBAN
+       settings are stored under an object of their own: they only mean
+       anything together, and a file reads better for the grouping. */
+    bool voicemeeter;
+    char vban_ip[VBAN_IP_MAX];
+    int  vban_port;
+    char vban_name[VBAN_NAME_MAX];
 } config_opts_t;
 
 /**
