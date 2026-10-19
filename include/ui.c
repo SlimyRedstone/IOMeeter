@@ -294,6 +294,11 @@ static void ui_on_fader_change(int id, int value, void *user)
     app_apply_volume(app, id);
 }
 
+/* The header's row. Fixed, because the header floats over it and a floating
+   child cannot be what sets its parent's height; 38 is the Connect button,
+   which is the tallest thing in the row. */
+#define HEADER_H        38
+
 /* A fader column is wider than its track so filenames have room underneath. */
 #define FADER_COLUMN_W  84
 
@@ -717,8 +722,20 @@ static bool ui_checkbox(Clay_ElementId id, const char *label, bool *value)
  *               centred, so one number covers it.
  */
 static void ui_text_field_sized(Clay_ElementId id, char *buffer, size_t cap,
-                                int font, bool *submitted, float height)
+                                int font, bool *submitted, float height,
+                                bool enabled)
 {
+    /*
+     * A disabled field gives up the caret rather than keeping it quietly.
+     * Without this, switching something off while its field was focused left
+     * s_focus pointing at a buffer with no box on screen: the keyboard went on
+     * filling it, invisibly, and the text appeared the moment it came back.
+     */
+    if (!enabled && s_focus == buffer) {
+        s_focus = NULL;
+        s_focus_cap = 0;
+    }
+
     bool focused = (s_focus == buffer);
 
     CLAY(id, {
@@ -728,11 +745,14 @@ static void ui_text_field_sized(Clay_ElementId id, char *buffer, size_t cap,
             .padding = { 12, 12, 8, 8 },
             .childAlignment = { .y = CLAY_ALIGN_Y_CENTER },
         },
-        .backgroundColor = C_FIELD,
+        .backgroundColor = enabled ? C_FIELD : C_CARD,
         .cornerRadius = CLAY_CORNER_RADIUS(8),
-        .border = { .color = focused ? C_ACCENT : C_BORDER, .width = { 1, 1, 1, 1 } },
+        .border = { .color = !enabled ? C_LINE
+                           : (focused ? C_ACCENT : C_BORDER),
+                    .width = { 1, 1, 1, 1 } },
     }) {
-        if (Clay_Hovered() && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+        if (enabled && Clay_Hovered() &&
+            IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
             s_focus = buffer;
             s_focus_cap = cap;
         }
@@ -749,7 +769,7 @@ static void ui_text_field_sized(Clay_ElementId id, char *buffer, size_t cap,
 
         CLAY_TEXT(dyn(shown), CLAY_TEXT_CONFIG({
             .fontId = font, .fontSize = FONT_SIZE_BODY,
-            .textColor = buffer[0] ? C_FG : C_MUTED }));
+            .textColor = (buffer[0] && enabled) ? C_FG : C_MUTED }));
     }
 
     if (submitted) {
@@ -760,7 +780,21 @@ static void ui_text_field_sized(Clay_ElementId id, char *buffer, size_t cap,
 static void ui_text_field(Clay_ElementId id, char *buffer, size_t cap,
                           int font, bool *submitted)
 {
-    ui_text_field_sized(id, buffer, cap, font, submitted, 38.0f);
+    ui_text_field_sized(id, buffer, cap, font, submitted, 38.0f, true);
+}
+
+/*
+ * A field that is only editable some of the time.
+ *
+ * Greyed and inert rather than swapped for a label: the box staying where it
+ * is keeps the row from changing shape as a checkbox is ticked, the value is
+ * still there to read, and there is one element with one identifier instead of
+ * two taking turns.
+ */
+static void ui_text_field_gated(Clay_ElementId id, char *buffer, size_t cap,
+                                int font, bool enabled)
+{
+    ui_text_field_sized(id, buffer, cap, font, NULL, 38.0f, enabled);
 }
 
 /*
@@ -1356,7 +1390,7 @@ static void ui_led_states_card(app_t *app)
                                    CLAY_SIZING_FIT(0) } } }) {
                     ui_text_field_sized(CLAY_IDI("LedHex", i), app->led_hex[i],
                                         APP_HEX_MAX, FONT_MONO, NULL,
-                                        (float)LED_ROW_H);
+                                        (float)LED_ROW_H, true);
                 }
             }
         }
@@ -2679,6 +2713,23 @@ static void ui_startup_card(app_t *app)
     }
 }
 
+/*
+ * Let go of the caret when none of the three fields is on screen.
+ *
+ * ui_text_field_sized() releases it for a field that is merely disabled, but
+ * the whole card goes unlaid-out while the passthrough is off, and an element
+ * that is never declared cannot give anything up. Without this the keyboard
+ * went on filling a buffer nobody could see.
+ */
+static void ui_vban_blur(void)
+{
+    if (s_focus == s_vban_ip || s_focus == s_vban_name ||
+        s_focus == s_vban_port) {
+        s_focus = NULL;
+        s_focus_cap = 0;
+    }
+}
+
 /* A field that follows the configuration while nothing is typing into it. */
 static void ui_vban_seed(char *buffer, size_t cap, const char *value)
 {
@@ -2697,6 +2748,11 @@ static void ui_vban_seed(char *buffer, size_t cap, const char *value)
  * Nothing here returns early: a Clay block is a loop, and leaving one from the
  * inside skips the call that closes the element.
  */
+/* The two field widths. An address is fifteen characters at the outside and a
+   stream name sixteen; a port is five. */
+#define VBAN_FIELD_W 196
+#define VBAN_PORT_W   96
+
 static void ui_vban_card(app_t *app)
 {
     bool on = app->opts.voicemeeter;
@@ -2716,14 +2772,18 @@ static void ui_vban_card(app_t *app)
                      app->opts.vban_port);
         }
 
+        /* Wide enough for the longest thing that goes in them and no wider:
+           a field grows to its row by default, which left an address box the
+           width of the card with three characters in it. */
         UI_FIELD_ROW() {
             ui_field_caption("Address");
 
-            if (on) {
-                ui_text_field(CLAY_ID("VbanIp"), s_vban_ip,
-                              sizeof(s_vban_ip), FONT_MONO, NULL);
-            } else {
-                ui_value_label(CLAY_ID("VbanIpShown"), app->opts.vban_ip, "");
+            CLAY_AUTO_ID({
+                .layout = { .sizing = { CLAY_SIZING_FIXED(VBAN_FIELD_W),
+                                        CLAY_SIZING_FIT(0) } },
+            }) {
+                ui_text_field_gated(CLAY_ID("VbanIp"), s_vban_ip,
+                                    sizeof(s_vban_ip), FONT_MONO, on);
             }
         }
 
@@ -2731,36 +2791,27 @@ static void ui_vban_card(app_t *app)
             ui_field_caption("Port");
 
             CLAY_AUTO_ID({
-                .layout = { .sizing = { CLAY_SIZING_FIXED(96),
+                .layout = { .sizing = { CLAY_SIZING_FIXED(VBAN_PORT_W),
                                         CLAY_SIZING_FIT(0) } },
             }) {
-                if (on) {
-                    ui_text_field(CLAY_ID("VbanPort"), s_vban_port,
-                                  sizeof(s_vban_port), FONT_MONO, NULL);
-                } else {
-                    ui_value_label(CLAY_ID("VbanPortShown"), s_vban_port, "");
-                }
+                ui_text_field_gated(CLAY_ID("VbanPort"), s_vban_port,
+                                    sizeof(s_vban_port), FONT_MONO, on);
             }
         }
 
         UI_FIELD_ROW() {
             ui_field_caption("Stream name");
 
-            if (on) {
-                ui_text_field(CLAY_ID("VbanName"), s_vban_name,
-                              sizeof(s_vban_name), FONT_MONO, NULL);
-            } else {
-                ui_value_label(CLAY_ID("VbanNameShown"), app->opts.vban_name,
-                               "");
+            CLAY_AUTO_ID({
+                .layout = { .sizing = { CLAY_SIZING_FIXED(VBAN_FIELD_W),
+                                        CLAY_SIZING_FIT(0) } },
+            }) {
+                ui_text_field_gated(CLAY_ID("VbanName"), s_vban_name,
+                                    sizeof(s_vban_name), FONT_MONO, on);
             }
         }
 
-        if (!on) {
-            CLAY_TEXT(CLAY_STRING("Switched off in Options."),
-                      CLAY_TEXT_CONFIG({
-                          .fontId = FONT_BODY, .fontSize = FONT_SIZE_SMALL,
-                          .textColor = C_MUTED }));
-        } else if (!vban_available()) {
+        if (!vban_available()) {
             /* An address that will not parse is the one mistake here that is
                both easy to make and otherwise silent. */
             CLAY_TEXT(dyn(vban_last_error()), CLAY_TEXT_CONFIG({
@@ -4499,6 +4550,12 @@ int ui_run(app_t *app)
 
         ui_strip_dismiss();
 
+        /* Not laid out with the passthrough off or another tab up, so the
+           fields cannot hand the caret back themselves. */
+        if (!app->opts.voicemeeter || s_tab != TAB_CONFIG) {
+            ui_vban_blur();
+        }
+
         /* Not while the colour panel or the question is up: both float over
            the step list, and a scrollbar underneath a panel must not still
            take the drag. */
@@ -4690,13 +4747,46 @@ int ui_run(app_t *app)
             .backgroundColor = C_BG,
         }) {
             /* ---- header ---- */
+            /*
+             * Two elements for one bar. The slot holds the row open in the
+             * flow and the header floats over it.
+             *
+             * Clay paints siblings in the order they are declared, and the
+             * header is declared first, so anything after it in the same
+             * batch is painted over it -- which is what a panel scrolled up
+             * to the top of the window did. A floating element goes into the
+             * batch that is drawn last instead, above the layout and above
+             * the widgets raylib paints between the two passes.
+             *
+             * Sized GROW on both axes, which for a floating element means its
+             * parent's dimensions exactly, so the bar lands on the slot with
+             * nothing measured by hand. The slot's height is fixed because a
+             * floating child cannot be what sets it: the tallest thing in the
+             * row is the Connect button at 38.
+             */
+            CLAY(CLAY_ID("HeaderSlot"), {
+                .layout = {
+                    .sizing = { CLAY_SIZING_GROW(0),
+                                CLAY_SIZING_FIXED(HEADER_H) },
+                },
+            }) {
             CLAY(CLAY_ID("Header"), {
                 .layout = {
                     /* Spans the window: the badge and buttons belong at the
                        edges, not gathered in the middle. */
-                    .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIT(0) },
+                    .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0) },
                     .childGap = 10,
                     .childAlignment = { .y = CLAY_ALIGN_Y_CENTER },
+                },
+                /* Opaque, so what passes underneath does not show through. */
+                .backgroundColor = C_BG,
+                .floating = {
+                    .attachTo = CLAY_ATTACH_TO_PARENT,
+                    .attachPoints = { CLAY_ATTACH_POINT_LEFT_TOP,
+                                      CLAY_ATTACH_POINT_LEFT_TOP },
+                    /* Under the editors and the modals, which should cover
+                       it, and over everything that is laid out. */
+                    .zIndex = 20,
                 },
             }) {
                 /* Hamburger. Three bars rather than a glyph, so it does not
@@ -4770,6 +4860,7 @@ int ui_run(app_t *app)
                     }
                 }
             }
+            }   /* HeaderSlot */
 
             ui_tab_bar();
 
@@ -4783,10 +4874,9 @@ int ui_run(app_t *app)
                     .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0) },
                     .childGap = 6,
                     .layoutDirection = CLAY_TOP_TO_BOTTOM,
-                    /* Left, not centred: two rows of different widths centred
-                       against each other read as two separate things rather
-                       than as a grid, and the left edge is the one they have
-                       in common. */
+                    /* Centred. Each row is as wide as its own content, so what
+                       is centred is the row rather than the cards inside it. */
+                    .childAlignment = { .x = CLAY_ALIGN_X_CENTER },
                     /* Clear on the right for the scrollbar, which raylib draws
                        over the panel rather than Clay laying it out: LOG_BAR_W
                        and the four pixels either side of it. */
@@ -4796,9 +4886,10 @@ int ui_run(app_t *app)
                 .clip = { .vertical = true,
                           .childOffset = Clay_GetScrollOffset() },
             }) {
-                /* Reading order across the grid: options, profiles, then
-                   the two LED cards. Side by side rather than stacked, which
-                   pushed everything below the slots off the window. */
+                /* Reading order down the tab: options with the VBAN
+                   settings beside them, then profiles, then the two LED
+                   cards. The VBAN card is only laid out while the passthrough
+                   is on, so with it off the first row is the options alone. */
                 CLAY(CLAY_ID("ConfigRow1"), {
                     .layout = {
                         .sizing = { CLAY_SIZING_FIT(0), CLAY_SIZING_FIT(0) },
@@ -4806,10 +4897,13 @@ int ui_run(app_t *app)
                     },
                 }) {
                     ui_startup_card(app);
-                    ui_profiles_card(app);
+
+                    if (app->opts.voicemeeter) {
+                        ui_vban_card(app);
+                    }
                 }
 
-                ui_vban_card(app);
+                ui_profiles_card(app);
 
                 CLAY(CLAY_ID("LedCards"), {
                     .layout = {

@@ -10,6 +10,29 @@
 
 Camera Raylib_camera;
 
+/*
+ * Open clip rectangles, innermost last.
+ *
+ * Clay emits a bare SCISSOR_END when a clip element closes and never re-opens
+ * whatever clip enclosed it, while raylib's EndScissorMode turns clipping off
+ * outright rather than restoring an outer rectangle -- raylib keeps no stack
+ * of its own. So one clip container inside another left everything drawn after
+ * the inner one closed completely unclipped: in IOMeeter, the profiles list
+ * inside the scrolling configuration tab, after which the rest of that tab
+ * escaped the panel and was drawn over the header.
+ *
+ * Keeping the open rectangles here and re-applying the one underneath on every
+ * close is what makes the pair behave.
+ */
+#define CLAY_RL_CLIP_MAX 16
+static Rectangle Clay_Raylib_clipStack[CLAY_RL_CLIP_MAX];
+static int Clay_Raylib_clipDepth = 0;
+
+static void Clay_Raylib_ClipApply(Rectangle r)
+{
+    BeginScissorMode((int)r.x, (int)r.y, (int)r.width, (int)r.height);
+}
+
 typedef enum
 {
     CUSTOM_LAYOUT_ELEMENT_TYPE_3D_MODEL
@@ -159,6 +182,11 @@ void Clay_Raylib_SetFonts(Font *fonts, int count)
 
 void Clay_Raylib_Render(Clay_RenderCommandArray renderCommands)
 {
+    /* Each call starts clean. A caller may render the command array in slices
+       -- IOMeeter splits it at the first floating element -- and a slice that
+       was cut mid-clip would otherwise leak its depth into the next one. */
+    Clay_Raylib_clipDepth = 0;
+
     for (int j = 0; j < renderCommands.length; j++)
     {
         Clay_RenderCommand *renderCommand = Clay_RenderCommandArray_Get(&renderCommands, j);
@@ -209,11 +237,39 @@ void Clay_Raylib_Render(Clay_RenderCommandArray renderCommands)
                 break;
             }
             case CLAY_RENDER_COMMAND_TYPE_SCISSOR_START: {
-                BeginScissorMode((int)roundf(boundingBox.x), (int)roundf(boundingBox.y), (int)roundf(boundingBox.width), (int)roundf(boundingBox.height));
+                Rectangle clip = { roundf(boundingBox.x), roundf(boundingBox.y), roundf(boundingBox.width), roundf(boundingBox.height) };
+
+                /* Intersected with whatever is already open: an inner clip can
+                   only narrow what is visible, never widen it past its
+                   parent. */
+                if (Clay_Raylib_clipDepth > 0) {
+                    Rectangle outer = Clay_Raylib_clipStack[Clay_Raylib_clipDepth - 1];
+                    float x0 = fmaxf(clip.x, outer.x);
+                    float y0 = fmaxf(clip.y, outer.y);
+                    float x1 = fminf(clip.x + clip.width, outer.x + outer.width);
+                    float y1 = fminf(clip.y + clip.height, outer.y + outer.height);
+
+                    clip = (Rectangle){ x0, y0, fmaxf(0.0f, x1 - x0), fmaxf(0.0f, y1 - y0) };
+                }
+
+                if (Clay_Raylib_clipDepth < CLAY_RL_CLIP_MAX) {
+                    Clay_Raylib_clipStack[Clay_Raylib_clipDepth++] = clip;
+                }
+
+                Clay_Raylib_ClipApply(clip);
                 break;
             }
             case CLAY_RENDER_COMMAND_TYPE_SCISSOR_END: {
+                if (Clay_Raylib_clipDepth > 0) {
+                    Clay_Raylib_clipDepth--;
+                }
+
                 EndScissorMode();
+
+                /* Back to the enclosing clip rather than to no clip at all. */
+                if (Clay_Raylib_clipDepth > 0) {
+                    Clay_Raylib_ClipApply(Clay_Raylib_clipStack[Clay_Raylib_clipDepth - 1]);
+                }
                 break;
             }
             case CLAY_RENDER_COMMAND_TYPE_RECTANGLE: {
@@ -301,5 +357,14 @@ void Clay_Raylib_Render(Clay_RenderCommandArray renderCommands)
                 exit(1);
             }
         }
+    }
+
+    /* A command array cut mid-clip would otherwise hand raylib back with
+       clipping still on, and everything drawn after this call -- the widgets
+       IOMeeter paints itself between the two passes -- would be held inside a
+       rectangle nobody asked for. */
+    if (Clay_Raylib_clipDepth > 0) {
+        Clay_Raylib_clipDepth = 0;
+        EndScissorMode();
     }
 }
